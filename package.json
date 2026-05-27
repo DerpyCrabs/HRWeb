@@ -1,0 +1,22 @@
+{
+  "name": "hrweb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsgo --noEmit",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "solid-js": "1.9.13"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260527.1",
+    "tailwindcss": "4.3.0",
+    "vite": "8.0.14",
+    "vite-plugin-solid": "2.11.12"
+  }
+}
