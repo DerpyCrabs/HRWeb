@@ -24,8 +24,25 @@ type Reading = {
   time: number;
 };
 
+type ExerciseLogEntry = {
+  id: string;
+  startedAt: number;
+  stoppedAt: number;
+  durationMs: number;
+  readings: Reading[];
+  targetZoneId: number;
+  zones: Zone[];
+  hiddenAt?: number;
+};
+
+type StoredExerciseLog = {
+  version?: number;
+  entries?: unknown;
+};
+
 type StatusMode = "muted" | "warn" | "live";
 type ExerciseState = "idle" | "running" | "paused" | "stopped";
+type DetailView = "live" | "log";
 
 type StatValue = number | "--";
 
@@ -69,6 +86,8 @@ type BluetoothNavigator = Navigator & {
 const HEART_RATE_SERVICE = "heart_rate";
 const HEART_RATE_MEASUREMENT = "heart_rate_measurement";
 const ZONES_STORAGE_KEY = "heartRateExercise.zones.v1";
+const EXERCISE_LOG_STORAGE_KEY = "heartRateExercise.log.v1";
+const STOP_HOLD_MS = 1000;
 const DEFAULT_ZONES: Zone[] = [
   { id: 1, name: "Zone 1", min: 90, max: 110, color: "#2a9d8f" },
   { id: 2, name: "Zone 2", min: 111, max: 130, color: "#70b62c" },
@@ -78,8 +97,8 @@ const DEFAULT_ZONES: Zone[] = [
 ];
 
 const cardClass = "rounded-lg border border-[#dbe2dc]/90 bg-white/95 shadow-[0_18px_45px_rgba(24,31,27,0.11)]";
-const primaryButtonClass = "min-h-[46px] cursor-pointer rounded-lg border border-transparent bg-[#d9184b] px-4 text-[1rem] font-extrabold text-white hover:bg-[#a80f37] disabled:cursor-not-allowed disabled:opacity-50";
-const secondaryButtonClass = "min-h-[46px] cursor-pointer rounded-lg border border-[#dbe2dc] bg-white px-4 text-[1rem] font-extrabold text-[#172019] hover:not-disabled:border-[#aebcaf] disabled:cursor-not-allowed disabled:opacity-50";
+const primaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-transparent bg-[#d9184b] px-4 text-center text-[1rem] font-extrabold leading-none text-white hover:bg-[#a80f37] disabled:cursor-not-allowed disabled:opacity-50";
+const secondaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-[#dbe2dc] bg-white px-4 text-center text-[0.95rem] font-bold leading-none text-[#172019] hover:not-disabled:border-[#aebcaf] hover:not-disabled:bg-[#fbfcfb] disabled:cursor-not-allowed disabled:border-[#e5ebe6] disabled:bg-[#fbfcfb] disabled:text-[#9aa39c]";
 
 function normalizeZones(nextZones: Zone[]): Zone[] {
   const normalized = nextZones.map((zone) => ({
@@ -123,11 +142,91 @@ function loadZoneState(): ZoneState {
   }
 }
 
+function isReading(value: unknown): value is Reading {
+  const reading = value as Reading;
+  return Number.isFinite(reading?.bpm) && Number.isFinite(reading?.time);
+}
+
+function isZone(value: unknown): value is Zone {
+  const zone = value as Zone;
+  return (
+    Number.isFinite(zone?.id) &&
+    typeof zone?.name === "string" &&
+    Number.isFinite(zone?.min) &&
+    Number.isFinite(zone?.max) &&
+    typeof zone?.color === "string"
+  );
+}
+
+function sanitizeLogEntry(value: unknown): ExerciseLogEntry | null {
+  const entry = value as ExerciseLogEntry;
+  if (
+    typeof entry?.id !== "string" ||
+    !Number.isFinite(entry.startedAt) ||
+    !Number.isFinite(entry.stoppedAt) ||
+    !Number.isFinite(entry.durationMs) ||
+    !Array.isArray(entry.readings)
+  ) {
+    return null;
+  }
+
+  const entryZones = Array.isArray(entry.zones) && entry.zones.every(isZone) ? entry.zones : DEFAULT_ZONES;
+  const targetZoneId = Number.isFinite(entry.targetZoneId) ? entry.targetZoneId : 3;
+
+  return {
+    id: entry.id,
+    startedAt: entry.startedAt,
+    stoppedAt: entry.stoppedAt,
+    durationMs: Math.max(0, entry.durationMs),
+    readings: entry.readings.filter(isReading).map((reading) => ({
+      bpm: Math.round(reading.bpm),
+      time: Math.max(0, Math.round(reading.time)),
+    })),
+    targetZoneId,
+    zones: normalizeZones(entryZones.map((zone) => ({ ...zone }))),
+    hiddenAt: Number.isFinite(entry.hiddenAt) ? entry.hiddenAt : undefined,
+  };
+}
+
+function loadExerciseLog(): ExerciseLogEntry[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(EXERCISE_LOG_STORAGE_KEY) || "null") as StoredExerciseLog | ExerciseLogEntry[] | null;
+    const entries = Array.isArray(stored) ? stored : stored?.entries;
+    if (!Array.isArray(entries)) return [];
+
+    return entries
+      .map(sanitizeLogEntry)
+      .filter((entry): entry is ExerciseLogEntry => Boolean(entry))
+      .sort((first, second) => second.stoppedAt - first.stoppedAt);
+  } catch {
+    return [];
+  }
+}
+
+function saveExerciseLog(entries: ExerciseLogEntry[]): void {
+  localStorage.setItem(
+    EXERCISE_LOG_STORAGE_KEY,
+    JSON.stringify({
+      version: 1,
+      entries,
+    }),
+  );
+}
+
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatDateTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function parseHeartRateMeasurement(dataView: DataView): number {
@@ -148,6 +247,19 @@ function saveZoneState(zones: Zone[], targetZoneId: number): void {
       targetZoneId,
     }),
   );
+}
+
+function getHeartRateStats(readings: Reading[]): HeartRateStats {
+  const values = readings.map((point) => point.bpm);
+  if (!values.length) {
+    return { min: "--", avg: "--", max: "--" };
+  }
+
+  return {
+    min: Math.min(...values),
+    avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
+    max: Math.max(...values),
+  };
 }
 
 type HeartChartProps = {
@@ -422,14 +534,27 @@ export default function App() {
   const [exerciseState, setExerciseState] = createSignal<ExerciseState>("idle");
   const [exerciseElapsedMs, setExerciseElapsedMs] = createSignal(0);
   const [exerciseStartedAt, setExerciseStartedAt] = createSignal<number | null>(null);
+  const [exerciseSessionStartedAt, setExerciseSessionStartedAt] = createSignal<number | null>(null);
   const [now, setNow] = createSignal(Date.now());
   const [zones, setZones] = createSignal<Zone[]>(initialZoneState.zones);
   const [targetZoneId, setTargetZoneId] = createSignal(initialZoneState.targetZoneId);
   const [device, setDevice] = createSignal<HeartRateDevice | null>(null);
   const [characteristic, setCharacteristic] = createSignal<HeartRateCharacteristic | null>(null);
   const [isMobile, setIsMobile] = createSignal(false);
+  const [exerciseLog, setExerciseLog] = createSignal<ExerciseLogEntry[]>(loadExerciseLog());
+  const [selectedLogId, setSelectedLogId] = createSignal<string | null>(null);
+  const [detailView, setDetailView] = createSignal<DetailView>("live");
+  const [stopHoldProgress, setStopHoldProgress] = createSignal(0);
+  const [deleteHoldProgress, setDeleteHoldProgress] = createSignal(0);
 
   let notificationCharacteristic: HeartRateCharacteristic | null = null;
+  let importInput!: HTMLInputElement;
+  let stopHoldTimer: number | undefined;
+  let stopHoldFrame: number | undefined;
+  let stopHoldStartedAt = 0;
+  let deleteHoldTimer: number | undefined;
+  let deleteHoldFrame: number | undefined;
+  let deleteHoldStartedAt = 0;
 
   const connected = createMemo(() => Boolean(device()?.gatt?.connected && characteristic()));
   const currentElapsedMs = createMemo(() => {
@@ -439,25 +564,42 @@ export default function App() {
 
     return exerciseElapsedMs() + now() - exerciseStartedAt()!;
   });
-  const stats = createMemo<HeartRateStats>(() => {
-    const values = readings().map((point) => point.bpm);
-    if (!values.length) {
-      return { min: "--", avg: "--", max: "--" };
-    }
-
-    return {
-      min: Math.min(...values),
-      avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
-      max: Math.max(...values),
-    };
-  });
+  const stats = createMemo<HeartRateStats>(() => getHeartRateStats(readings()));
   const latestZone = createMemo(() => {
     const rate = latestRate();
     return rate === null ? null : getZoneForRate(zones(), rate);
   });
+  const visibleExerciseLog = createMemo(() => exerciseLog().filter((entry) => !entry.hiddenAt));
+  const selectedLog = createMemo(() => {
+    const id = selectedLogId();
+    const entries = visibleExerciseLog();
+    return entries.find((entry) => entry.id === id) || entries[0] || null;
+  });
+  const selectedLogReadings = createMemo(() => selectedLog()?.readings || []);
+  const selectedLogZones = createMemo(() => selectedLog()?.zones || zones());
+  const selectedLogTargetZoneId = createMemo(() => selectedLog()?.targetZoneId || targetZoneId());
+  const selectedLogStats = createMemo<HeartRateStats>(() => getHeartRateStats(selectedLogReadings()));
+  const displayReadings = createMemo(() => (detailView() === "log" ? selectedLogReadings() : readings()));
+  const displayZones = createMemo(() => (detailView() === "log" ? selectedLogZones() : zones()));
+  const displayTargetZoneId = createMemo(() => (detailView() === "log" ? selectedLogTargetZoneId() : targetZoneId()));
+  const displayStats = createMemo(() => (detailView() === "log" ? selectedLogStats() : stats()));
+  const displayDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : currentElapsedMs()));
 
   createEffect(() => {
     saveZoneState(zones(), targetZoneId());
+  });
+
+  createEffect(() => {
+    saveExerciseLog(exerciseLog());
+  });
+
+  createEffect(() => {
+    const entries = visibleExerciseLog();
+    if (!selectedLogId() && entries.length) {
+      setSelectedLogId(entries[0]!.id);
+    } else if (selectedLogId() && !entries.some((entry) => entry.id === selectedLogId())) {
+      setSelectedLogId(entries[0]?.id || null);
+    }
   });
 
   onMount(() => {
@@ -479,6 +621,8 @@ export default function App() {
     if (notificationCharacteristic) {
       notificationCharacteristic.removeEventListener("characteristicvaluechanged", handleHeartRateNotification);
     }
+    cancelStopHold();
+    cancelDeleteHold();
   });
 
   const setStatus = (label: string, mode: StatusMode = "muted"): void => {
@@ -613,15 +757,18 @@ export default function App() {
       return;
     }
 
+    const startedAt = Date.now();
     setReadings([]);
     setLastRate(null);
     setExerciseElapsedMs(0);
-    setExerciseStartedAt(Date.now());
-    setNow(Date.now());
+    setExerciseStartedAt(startedAt);
+    setExerciseSessionStartedAt(startedAt);
+    setNow(startedAt);
     setExerciseState("running");
     setStatus("Recording", "live");
     setMessage("");
     setTrend("Recording");
+    setDetailView("live");
   }
 
   function pauseExercise() {
@@ -645,12 +792,66 @@ export default function App() {
   function stopExercise() {
     if (exerciseState() !== "running" && exerciseState() !== "paused") return;
 
-    setExerciseElapsedMs(currentElapsedMs());
+    const stoppedAt = Date.now();
+    const durationMs = currentElapsedMs();
+    const currentReadings = readings();
+    const startedAt = exerciseSessionStartedAt() || stoppedAt - durationMs;
+    const entry: ExerciseLogEntry = {
+      id: `${stoppedAt}-${Math.random().toString(36).slice(2, 9)}`,
+      startedAt,
+      stoppedAt,
+      durationMs,
+      readings: currentReadings,
+      targetZoneId: targetZoneId(),
+      zones: zones().map((zone) => ({ ...zone })),
+    };
+
+    setExerciseLog((entries) => [entry, ...entries]);
+    setSelectedLogId(entry.id);
+    setDetailView("log");
+    setExerciseElapsedMs(durationMs);
     setExerciseStartedAt(null);
+    setExerciseSessionStartedAt(null);
     setExerciseState("stopped");
     setStatus(connected() ? "Live" : "Stopped", connected() ? "live" : "warn");
     setMessage("");
     setTrend(readings().length ? "Done" : "Stopped");
+  }
+
+  function cancelStopHold(): void {
+    if (stopHoldTimer !== undefined) {
+      window.clearTimeout(stopHoldTimer);
+      stopHoldTimer = undefined;
+    }
+
+    if (stopHoldFrame !== undefined) {
+      window.cancelAnimationFrame(stopHoldFrame);
+      stopHoldFrame = undefined;
+    }
+
+    stopHoldStartedAt = 0;
+    setStopHoldProgress(0);
+  }
+
+  function startStopHold(): void {
+    if (exerciseState() !== "running" && exerciseState() !== "paused") return;
+    cancelStopHold();
+
+    stopHoldStartedAt = Date.now();
+    const updateProgress = () => {
+      const progress = Math.min(1, (Date.now() - stopHoldStartedAt) / STOP_HOLD_MS);
+      setStopHoldProgress(progress);
+      if (progress < 1) {
+        stopHoldFrame = window.requestAnimationFrame(updateProgress);
+      }
+    };
+
+    updateProgress();
+    stopHoldTimer = window.setTimeout(() => {
+      setStopHoldProgress(1);
+      stopExercise();
+      window.setTimeout(cancelStopHold, 120);
+    }, STOP_HOLD_MS);
   }
 
   function handleExerciseButton() {
@@ -682,6 +883,101 @@ export default function App() {
     }
   }
 
+  function exportExerciseLog(): void {
+    const payload = JSON.stringify({ version: 1, entries: visibleExerciseLog() }, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const date = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `exercise-log-${date}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importExerciseLog(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as StoredExerciseLog | ExerciseLogEntry[];
+      const entries = Array.isArray(parsed) ? parsed : parsed.entries;
+      if (!Array.isArray(entries)) {
+        throw new Error("File does not contain an exercise log.");
+      }
+
+      const nextEntries = entries
+        .map(sanitizeLogEntry)
+        .filter((entry): entry is ExerciseLogEntry => Boolean(entry));
+
+      if (!nextEntries.length) {
+        throw new Error("No valid exercise entries were found.");
+      }
+
+      const merged = new Map<string, ExerciseLogEntry>();
+      [...nextEntries, ...exerciseLog()].forEach((entry) => merged.set(entry.id, entry));
+      const sorted = [...merged.values()].sort((first, second) => second.stoppedAt - first.stoppedAt);
+      setExerciseLog(sorted);
+      setSelectedLogId(sorted[0]?.id || null);
+      setDetailView("log");
+      setMessage(`Imported ${nextEntries.length} exercise${nextEntries.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setMessage((error as Error).message || "Could not import exercise log.");
+    } finally {
+      input.value = "";
+    }
+  }
+
+  function deleteSelectedLog(): void {
+    const entry = selectedLog();
+    if (!entry) return;
+
+    setExerciseLog((entries) => {
+      const nextEntries = entries.map((item) => (item.id === entry.id ? { ...item, hiddenAt: Date.now() } : item));
+      const nextVisibleEntries = nextEntries.filter((item) => !item.hiddenAt);
+      setSelectedLogId(nextVisibleEntries[0]?.id || null);
+      return nextEntries;
+    });
+  }
+
+  function cancelDeleteHold(): void {
+    if (deleteHoldTimer !== undefined) {
+      window.clearTimeout(deleteHoldTimer);
+      deleteHoldTimer = undefined;
+    }
+
+    if (deleteHoldFrame !== undefined) {
+      window.cancelAnimationFrame(deleteHoldFrame);
+      deleteHoldFrame = undefined;
+    }
+
+    deleteHoldStartedAt = 0;
+    setDeleteHoldProgress(0);
+  }
+
+  function startDeleteHold(): void {
+    if (!selectedLog()) return;
+    cancelDeleteHold();
+
+    deleteHoldStartedAt = Date.now();
+    const updateProgress = () => {
+      const progress = Math.min(1, (Date.now() - deleteHoldStartedAt) / STOP_HOLD_MS);
+      setDeleteHoldProgress(progress);
+      if (progress < 1) {
+        deleteHoldFrame = window.requestAnimationFrame(updateProgress);
+      }
+    };
+
+    updateProgress();
+    deleteHoldTimer = window.setTimeout(() => {
+      setDeleteHoldProgress(1);
+      deleteSelectedLog();
+      window.setTimeout(cancelDeleteHold, 120);
+    }, STOP_HOLD_MS);
+  }
+
   return (
     <div class="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(217,24,75,0.13),transparent_30rem),linear-gradient(145deg,#f6f7f4_0%,#eef4f2_45%,#faf7f2_100%)] text-[#172019]">
     <main class={`mx-auto grid w-[min(1180px,calc(100vw-32px))] grid-cols-[minmax(300px,390px)_1fr] gap-[18px] py-8 max-[820px]:grid-cols-1 max-[820px]:py-[18px] ${isMobile() ? "!w-[calc(100vw-14px)] !gap-2 !py-2" : ""}`}>
@@ -703,11 +999,13 @@ export default function App() {
           <div class={`mt-3.5 min-h-[26px] font-semibold text-[#617066] ${isMobile() ? "!mt-0.5 min-h-[18px] text-[0.95rem]" : ""}`}>{trend()}</div>
         </div>
 
-        <div class={`grid grid-cols-3 gap-2.5 ${isMobile() ? "!gap-1.5" : ""}`} aria-label="Bluetooth and exercise controls">
+        <div class={`grid ${connected() ? "grid-cols-3" : "grid-cols-2"} gap-2.5 ${isMobile() ? "!gap-1.5" : ""}`} aria-label="Bluetooth and exercise controls">
           <Show when={!connected()}>
             <button class={`${primaryButtonClass} col-span-full ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" onClick={connectMonitor}>Connect monitor</button>
           </Show>
-          <button class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" disabled={!connected()} onClick={disconnectMonitor}>Disconnect</button>
+          <Show when={connected()}>
+            <button class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.9rem]" : ""}`} type="button" onClick={disconnectMonitor}>Disconnect</button>
+          </Show>
           <button
             class={`${exerciseState() === "running" ? `${secondaryButtonClass} border-[#986b00]/35 bg-[#986b00]/10 text-[#986b00]` : primaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`}
             type="button"
@@ -716,50 +1014,137 @@ export default function App() {
           >
             {exerciseButtonLabel()}
           </button>
-          <button class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" disabled={exerciseState() !== "running" && exerciseState() !== "paused"} onClick={stopExercise}>Stop</button>
+          <button
+            class={`${secondaryButtonClass} relative overflow-hidden ${stopHoldProgress() > 0 ? "border-[#d9184b]/45 text-[#d9184b]" : ""} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`}
+            type="button"
+            disabled={exerciseState() !== "running" && exerciseState() !== "paused"}
+            onPointerDown={startStopHold}
+            onPointerUp={cancelStopHold}
+            onPointerLeave={cancelStopHold}
+            onPointerCancel={cancelStopHold}
+            onKeyDown={(event) => {
+              if ((event.key === "Enter" || event.key === " ") && stopHoldProgress() === 0) {
+                event.preventDefault();
+                startStopHold();
+              }
+            }}
+            onKeyUp={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                cancelStopHold();
+              }
+            }}
+          >
+            <span class="absolute inset-y-0 left-0 bg-[#d9184b]/12" style={{ width: `${stopHoldProgress() * 100}%` }} />
+            <span class="relative">{stopHoldProgress() > 0 ? "Hold..." : "Stop"}</span>
+          </button>
         </div>
 
-        <Show when={message()}>
-          <p class={`mt-[18px] min-h-[22px] leading-[1.45] text-[#617066] ${isMobile() ? "!mt-1.5 min-h-0 text-[0.82rem]" : ""}`} aria-live="polite">{message()}</p>
-        </Show>
       </section>
 
       <section class={`${cardClass} min-w-0 p-[22px] ${isMobile() ? "!p-[8px_8px_10px]" : ""}`} aria-labelledby="chart-title">
         <div class={`flex items-start justify-between gap-4 ${isMobile() ? "block" : ""}`}>
           <Show when={!isMobile()}>
             <div>
-              <p class="m-0 mb-1.5 text-[0.77rem] font-bold uppercase tracking-normal text-[#617066]">Exercise trace</p>
-              <h2 id="chart-title" class="m-0 text-xl tracking-normal">Full exercise graph</h2>
+              <div id="chart-title" class="grid grid-cols-2 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
+                <button class={`min-h-9 rounded-md px-4 text-[0.9rem] font-extrabold ${detailView() === "live" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("live")}>Live</button>
+                <button class={`min-h-9 rounded-md px-4 text-[0.9rem] font-extrabold ${detailView() === "log" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("log")}>Log</button>
+              </div>
             </div>
           </Show>
           <div class={`grid grid-cols-4 gap-2 ${isMobile() ? "!w-full !grid-cols-4 !gap-1" : ""}`}>
             <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
-              <span class="block">{formatDuration(currentElapsedMs())}</span>
+              <span class="block">{formatDuration(displayDurationMs())}</span>
               <small class="block font-bold text-[#617066]">Time</small>
             </div>
             <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
-              <span class="block">{stats().min}</span>
+              <span class="block">{displayStats().min}</span>
               <small class="block font-bold text-[#617066]">Min HR</small>
             </div>
             <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
-              <span class="block">{stats().avg}</span>
+              <span class="block">{displayStats().avg}</span>
               <small class="block font-bold text-[#617066]">Avg HR</small>
             </div>
             <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
-              <span class="block">{stats().max}</span>
+              <span class="block">{displayStats().max}</span>
               <small class="block font-bold text-[#617066]">Max HR</small>
             </div>
           </div>
         </div>
 
-        <HeartChart readings={readings} zones={zones} targetZoneId={targetZoneId} mobile={isMobile} />
-        <ZoneEditor
-          zones={zones}
-          targetZoneId={targetZoneId}
-          mobile={isMobile}
-          onZonesChange={updateZones}
-          onTargetChange={updateTargetZone}
-        />
+        <Show when={isMobile()}>
+          <div class="mt-2 grid grid-cols-2 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
+            <button class={`min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === "live" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("live")}>Live</button>
+            <button class={`min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === "log" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("log")}>Log</button>
+          </div>
+        </Show>
+
+        <Show
+          when={detailView() === "log"}
+          fallback={
+            <div class={`min-h-[574px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} />
+              <ZoneEditor
+                zones={zones}
+                targetZoneId={targetZoneId}
+                mobile={isMobile}
+                onZonesChange={updateZones}
+                onTargetChange={updateTargetZone}
+              />
+            </div>
+          }
+        >
+          <div class={`mt-5 grid min-h-[574px] grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!mt-2 !min-h-[520px] !gap-2" : ""}`}>
+            <div class="flex min-h-[220px] flex-col rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2">
+              <Show when={visibleExerciseLog().length} fallback={<p class="m-0 p-3 text-sm font-semibold text-[#617066]">No exercises yet.</p>}>
+                <div class="grid gap-1.5">
+                  <For each={visibleExerciseLog()}>
+                    {(entry) => (
+                      <button
+                        class={`rounded-md border px-3 py-2 text-left ${entry.id === selectedLog()?.id ? "border-[#d9184b]/35 bg-white text-[#172019]" : "border-transparent text-[#617066] hover:bg-white"}`}
+                        type="button"
+                        onClick={() => setSelectedLogId(entry.id)}
+                      >
+                        <span class="block text-[0.9rem] font-extrabold">{formatDateTime(entry.stoppedAt)}</span>
+                        <span class="block text-[0.78rem] font-bold">{formatDuration(entry.durationMs)} · {entry.readings.length} readings</span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <div class="mt-auto grid grid-cols-3 gap-2 border-t border-[#dbe2dc] pt-2">
+                <button class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" disabled={!visibleExerciseLog().length} onClick={exportExerciseLog}>Export</button>
+                <button class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" onClick={() => importInput.click()}>Import</button>
+                <button
+                  class={`${secondaryButtonClass} relative !min-h-9 overflow-hidden !px-2 !text-[0.82rem] ${deleteHoldProgress() > 0 ? "border-[#d9184b]/45 text-[#d9184b]" : ""}`}
+                  type="button"
+                  disabled={!selectedLog()}
+                  onPointerDown={startDeleteHold}
+                  onPointerUp={cancelDeleteHold}
+                  onPointerLeave={cancelDeleteHold}
+                  onPointerCancel={cancelDeleteHold}
+                  onKeyDown={(event) => {
+                    if ((event.key === "Enter" || event.key === " ") && deleteHoldProgress() === 0) {
+                      event.preventDefault();
+                      startDeleteHold();
+                    }
+                  }}
+                  onKeyUp={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      cancelDeleteHold();
+                    }
+                  }}
+                >
+                  <span class="absolute inset-y-0 left-0 bg-[#d9184b]/12" style={{ width: `${deleteHoldProgress() * 100}%` }} />
+                  <span class="relative">{deleteHoldProgress() > 0 ? "Hold" : "Delete"}</span>
+                </button>
+                <input ref={importInput} class="hidden" type="file" accept="application/json,.json" onChange={importExerciseLog} />
+              </div>
+            </div>
+            <div class="min-w-0">
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} />
+            </div>
+          </div>
+        </Show>
       </section>
     </main>
     </div>
