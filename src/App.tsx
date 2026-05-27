@@ -555,6 +555,7 @@ export default function App() {
   let deleteHoldTimer: number | undefined;
   let deleteHoldFrame: number | undefined;
   let deleteHoldStartedAt = 0;
+  let idleReadingsStartedAt: number | null = null;
 
   const connected = createMemo(() => Boolean(device()?.gatt?.connected && characteristic()));
   const currentElapsedMs = createMemo(() => {
@@ -650,6 +651,13 @@ export default function App() {
     setLatestRate(rounded);
 
     if (exerciseState() !== "running") {
+      if (exerciseState() === "idle") {
+        const receivedAt = Date.now();
+        idleReadingsStartedAt ??= receivedAt;
+        setReadings((items) => [...items, { bpm: rounded, time: receivedAt - idleReadingsStartedAt! }]);
+        setLastRate(rounded);
+      }
+
       if (exerciseState() === "paused") {
         setTrend("Paused");
       } else if (exerciseState() === "stopped") {
@@ -760,6 +768,7 @@ export default function App() {
     const startedAt = Date.now();
     setReadings([]);
     setLastRate(null);
+    idleReadingsStartedAt = null;
     setExerciseElapsedMs(0);
     setExerciseStartedAt(startedAt);
     setExerciseSessionStartedAt(startedAt);
