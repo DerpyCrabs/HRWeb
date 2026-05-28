@@ -22,6 +22,7 @@ type StoredZoneState = {
 type Reading = {
   bpm: number;
   time: number;
+  rrIntervalsMs?: number[];
 };
 
 type ExerciseLogEntry = {
@@ -56,7 +57,13 @@ type HeartRateStats = {
   min: StatValue;
   avg: StatValue;
   max: StatValue;
+  hrvRmssd: StatValue;
   zoneTimes: ZoneTimeStat[];
+};
+
+type HeartRateMeasurement = {
+  bpm: number;
+  rrIntervalsMs: number[];
 };
 
 type HeartRateCharacteristic = EventTarget & {
@@ -106,6 +113,7 @@ const DEFAULT_ZONES: Zone[] = [
 const cardClass = "rounded-lg border border-[#dbe2dc]/90 bg-white/95 shadow-[0_18px_45px_rgba(24,31,27,0.11)]";
 const primaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-transparent bg-[#d9184b] px-4 text-center text-[1rem] font-extrabold leading-none text-white hover:bg-[#a80f37] disabled:cursor-not-allowed disabled:opacity-50";
 const secondaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-[#dbe2dc] bg-white px-4 text-center text-[0.95rem] font-bold leading-none text-[#172019] hover:not-disabled:border-[#aebcaf] hover:not-disabled:bg-[#fbfcfb] disabled:cursor-not-allowed disabled:border-[#e5ebe6] disabled:bg-[#fbfcfb] disabled:text-[#9aa39c]";
+const statTileClass = "min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right";
 
 function normalizeZones(nextZones: Zone[]): Zone[] {
   const normalized = nextZones.map((zone) => ({
@@ -151,7 +159,14 @@ function loadZoneState(): ZoneState {
 
 function isReading(value: unknown): value is Reading {
   const reading = value as Reading;
-  return Number.isFinite(reading?.bpm) && Number.isFinite(reading?.time);
+  return (
+    Number.isFinite(reading?.bpm) &&
+    Number.isFinite(reading?.time) &&
+    (
+      reading.rrIntervalsMs === undefined ||
+      (Array.isArray(reading.rrIntervalsMs) && reading.rrIntervalsMs.every((interval) => Number.isFinite(interval) && interval > 0))
+    )
+  );
 }
 
 function isZone(value: unknown): value is Zone {
@@ -188,6 +203,9 @@ function sanitizeLogEntry(value: unknown): ExerciseLogEntry | null {
     readings: entry.readings.filter(isReading).map((reading) => ({
       bpm: Math.round(reading.bpm),
       time: Math.max(0, Math.round(reading.time)),
+      ...(reading.rrIntervalsMs?.length
+        ? { rrIntervalsMs: reading.rrIntervalsMs.map((interval) => Math.max(1, Math.round(interval))) }
+        : {}),
     })),
     targetZoneId,
     zones: normalizeZones(entryZones.map((zone) => ({ ...zone }))),
@@ -214,7 +232,7 @@ function saveExerciseLog(entries: ExerciseLogEntry[]): void {
   localStorage.setItem(
     EXERCISE_LOG_STORAGE_KEY,
     JSON.stringify({
-      version: 1,
+      version: 2,
       entries,
     }),
   );
@@ -251,10 +269,30 @@ function formatDateTime(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
-function parseHeartRateMeasurement(dataView: DataView): number {
+function parseHeartRateMeasurement(dataView: DataView): HeartRateMeasurement {
   const flags = dataView.getUint8(0);
   const isUint16 = Boolean(flags & 0x01);
-  return isUint16 ? dataView.getUint16(1, true) : dataView.getUint8(1);
+  const hasEnergyExpended = Boolean(flags & 0x08);
+  const hasRrIntervals = Boolean(flags & 0x10);
+  let offset = 1;
+
+  const bpm = isUint16 ? dataView.getUint16(offset, true) : dataView.getUint8(offset);
+  offset += isUint16 ? 2 : 1;
+
+  if (hasEnergyExpended) {
+    offset += 2;
+  }
+
+  const rrIntervalsMs: number[] = [];
+  if (hasRrIntervals) {
+    while (offset + 1 < dataView.byteLength) {
+      const rrInterval1024 = dataView.getUint16(offset, true);
+      rrIntervalsMs.push((rrInterval1024 / 1024) * 1000);
+      offset += 2;
+    }
+  }
+
+  return { bpm, rrIntervalsMs };
 }
 
 function getZoneForRate(zones: Zone[], bpm: number): Zone | null {
@@ -276,7 +314,7 @@ function getHeartRateStats(readings: Reading[], zones: Zone[], durationMs: numbe
   const emptyZoneTimes = zones.map((zone) => ({ zone, durationMs: 0, percent: 0 }));
 
   if (!values.length) {
-    return { min: "--", avg: "--", max: "--", zoneTimes: emptyZoneTimes };
+    return { min: "--", avg: "--", max: "--", hrvRmssd: "--", zoneTimes: emptyZoneTimes };
   }
 
   const zoneDurations = new Map(zones.map((zone) => [zone.id, 0]));
@@ -298,6 +336,7 @@ function getHeartRateStats(readings: Reading[], zones: Zone[], durationMs: numbe
     min: Math.min(...values),
     avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
     max: Math.max(...values),
+    hrvRmssd: getRmssd(readings),
     zoneTimes: zones.map((zone) => {
       const zoneDurationMs = zoneDurations.get(zone.id) || 0;
       return {
@@ -307,6 +346,23 @@ function getHeartRateStats(readings: Reading[], zones: Zone[], durationMs: numbe
       };
     }),
   };
+}
+
+function getRmssd(readings: Reading[]): StatValue {
+  const rrIntervals = readings.flatMap((reading) => reading.rrIntervalsMs || []);
+  if (rrIntervals.length < 2) return "--";
+
+  let squaredDifferenceSum = 0;
+  for (let index = 1; index < rrIntervals.length; index += 1) {
+    const difference = rrIntervals[index]! - rrIntervals[index - 1]!;
+    squaredDifferenceSum += difference * difference;
+  }
+
+  return Math.round(Math.sqrt(squaredDifferenceSum / (rrIntervals.length - 1)));
+}
+
+function formatHrv(value: StatValue): string {
+  return typeof value === "number" ? `${value} ms` : value;
 }
 
 type HeartChartProps = {
@@ -750,15 +806,18 @@ export default function App() {
     }
   };
 
-  function addReading(bpm: number): void {
-    const rounded = Math.round(bpm);
+  function addReading(measurement: HeartRateMeasurement): void {
+    const rounded = Math.round(measurement.bpm);
+    const rrIntervalsMs = measurement.rrIntervalsMs.length
+      ? measurement.rrIntervalsMs.map((interval) => Math.max(1, Math.round(interval)))
+      : undefined;
     setLatestRate(rounded);
 
     if (exerciseState() !== "running") {
       if (exerciseState() === "idle") {
         const receivedAt = Date.now();
         idleReadingsStartedAt ??= receivedAt;
-        setReadings((items) => [...items, { bpm: rounded, time: receivedAt - idleReadingsStartedAt! }]);
+        setReadings((items) => [...items, { bpm: rounded, time: receivedAt - idleReadingsStartedAt!, ...(rrIntervalsMs ? { rrIntervalsMs } : {}) }]);
         setLastRate(rounded);
       }
 
@@ -772,7 +831,7 @@ export default function App() {
       return;
     }
 
-    setReadings((items) => [...items, { bpm: rounded, time: currentElapsedMs() }]);
+    setReadings((items) => [...items, { bpm: rounded, time: currentElapsedMs(), ...(rrIntervalsMs ? { rrIntervalsMs } : {}) }]);
 
     if (lastRate() === null) {
       setTrend("Recording");
@@ -997,7 +1056,7 @@ export default function App() {
   }
 
   function exportExerciseLog(): void {
-    const payload = JSON.stringify({ version: 1, entries: visibleExerciseLog() }, null, 2);
+    const payload = JSON.stringify({ version: 2, entries: visibleExerciseLog() }, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1164,23 +1223,29 @@ export default function App() {
               </div>
             </div>
           </Show>
-          <div class={`grid grid-cols-4 gap-2 ${isMobile() ? "!w-full !grid-cols-4 !gap-1" : ""}`}>
-            <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
+          <div class={`grid ${detailView() === "log" ? "grid-cols-5" : "grid-cols-4"} gap-2 ${isMobile() ? `!w-full ${detailView() === "log" ? "!grid-cols-5" : "!grid-cols-4"} !gap-1` : ""}`}>
+            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{formatDuration(displayDurationMs())}</span>
               <small class="block font-bold text-[#617066]">Time</small>
             </div>
-            <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
+            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().min}</span>
               <small class="block font-bold text-[#617066]">Min HR</small>
             </div>
-            <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
+            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().avg}</span>
               <small class="block font-bold text-[#617066]">Avg HR</small>
             </div>
-            <div class={`min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "[&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums"}`}>
+            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().max}</span>
               <small class="block font-bold text-[#617066]">Max HR</small>
             </div>
+            <Show when={detailView() === "log"}>
+              <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
+                <span class="block">{formatHrv(displayStats().hrvRmssd)}</span>
+                <small class="block font-bold text-[#617066]">HRV</small>
+              </div>
+            </Show>
           </div>
         </div>
 
@@ -1194,7 +1259,7 @@ export default function App() {
         <Show
           when={detailView() === "log"}
           fallback={
-            <div class={`min-h-[574px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
+            <div class={`min-h-[617px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
               <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showLogTimeAxis} />
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
               <ZoneEditor
@@ -1207,7 +1272,7 @@ export default function App() {
             </div>
           }
         >
-          <div class={`mt-5 grid min-h-[574px] grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!mt-2 !min-h-[520px] !gap-2" : ""}`}>
+          <div class={`mt-5 grid min-h-[617px] grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!mt-2 !min-h-[520px] !gap-2" : ""}`}>
             <div class="flex min-h-[220px] flex-col rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2">
               <Show when={visibleExerciseLog().length} fallback={<p class="m-0 p-3 text-sm font-semibold text-[#617066]">No exercises yet.</p>}>
                 <div class="grid gap-1.5">
