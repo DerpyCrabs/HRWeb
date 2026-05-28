@@ -46,10 +46,17 @@ type DetailView = "live" | "log";
 
 type StatValue = number | "--";
 
+type ZoneTimeStat = {
+  zone: Zone;
+  durationMs: number;
+  percent: number;
+};
+
 type HeartRateStats = {
   min: StatValue;
   avg: StatValue;
   max: StatValue;
+  zoneTimes: ZoneTimeStat[];
 };
 
 type HeartRateCharacteristic = EventTarget & {
@@ -220,6 +227,21 @@ function formatDuration(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatZoneDuration(ms: number): string {
+  if (ms <= 0) return "0:00";
+
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 function formatDateTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -249,16 +271,41 @@ function saveZoneState(zones: Zone[], targetZoneId: number): void {
   );
 }
 
-function getHeartRateStats(readings: Reading[]): HeartRateStats {
+function getHeartRateStats(readings: Reading[], zones: Zone[], durationMs: number): HeartRateStats {
   const values = readings.map((point) => point.bpm);
+  const emptyZoneTimes = zones.map((zone) => ({ zone, durationMs: 0, percent: 0 }));
+
   if (!values.length) {
-    return { min: "--", avg: "--", max: "--" };
+    return { min: "--", avg: "--", max: "--", zoneTimes: emptyZoneTimes };
   }
+
+  const zoneDurations = new Map(zones.map((zone) => [zone.id, 0]));
+  const fallbackInterval = readings.length > 1 ? Math.max(0, readings[1]!.time - readings[0]!.time) : 0;
+
+  readings.forEach((reading, index) => {
+    const nextReading = readings[index + 1];
+    const nextTime = nextReading?.time ?? Math.max(reading.time, durationMs || reading.time + fallbackInterval);
+    const intervalMs = Math.max(0, nextTime - reading.time);
+    const zone = getZoneForRate(zones, reading.bpm);
+    if (zone) {
+      zoneDurations.set(zone.id, (zoneDurations.get(zone.id) || 0) + intervalMs);
+    }
+  });
+
+  const trackedDurationMs = [...zoneDurations.values()].reduce((sum, value) => sum + value, 0);
 
   return {
     min: Math.min(...values),
     avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
     max: Math.max(...values),
+    zoneTimes: zones.map((zone) => {
+      const zoneDurationMs = zoneDurations.get(zone.id) || 0;
+      return {
+        zone,
+        durationMs: zoneDurationMs,
+        percent: trackedDurationMs > 0 ? Math.round((zoneDurationMs / trackedDurationMs) * 100) : 0,
+      };
+    }),
   };
 }
 
@@ -267,6 +314,7 @@ type HeartChartProps = {
   zones: Accessor<Zone[]>;
   targetZoneId: Accessor<number>;
   mobile: Accessor<boolean>;
+  showTimeAxis?: Accessor<boolean>;
 };
 
 function HeartChart(props: HeartChartProps): JSX.Element {
@@ -276,11 +324,11 @@ function HeartChart(props: HeartChartProps): JSX.Element {
     const readings = props.readings();
     const zones = props.zones();
     const targetZoneId = props.targetZoneId();
-    drawChart(canvas, readings, zones, targetZoneId, props.mobile());
+    drawChart(canvas, readings, zones, targetZoneId, props.mobile(), props.showTimeAxis?.() ?? false);
   });
 
   onMount(() => {
-    const resize = () => drawChart(canvas, props.readings(), props.zones(), props.targetZoneId(), props.mobile());
+    const resize = () => drawChart(canvas, props.readings(), props.zones(), props.targetZoneId(), props.mobile(), props.showTimeAxis?.() ?? false);
     window.addEventListener("resize", resize);
     onCleanup(() => window.removeEventListener("resize", resize));
   });
@@ -298,6 +346,7 @@ function drawChart(
   zones: Zone[],
   targetZoneId: number,
   mobile = false,
+  showTimeAxis = false,
 ): void {
   if (!canvas) return;
 
@@ -314,10 +363,10 @@ function drawChart(
     canvas.height = height;
   }
 
-  const padding = mobile ? 0 : Math.max(34, Math.round(width * 0.04));
-  const left = padding;
-  const right = mobile ? 0 : padding * 0.5;
-  const bottomPadding = mobile ? 0 : padding * 1.1;
+  const padding = mobile ? Math.max(20, Math.round(width * 0.035)) : Math.max(34, Math.round(width * 0.04));
+  const left = mobile ? (showTimeAxis ? padding * 1.4 : 0) : padding;
+  const right = mobile ? (showTimeAxis ? padding * 0.55 : 0) : padding * 0.5;
+  const bottomPadding = mobile ? (showTimeAxis ? padding * 1.55 : 0) : (showTimeAxis ? padding * 1.45 : padding * 1.1);
   const top = mobile ? 0 : padding * 0.55;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottomPadding;
@@ -380,12 +429,43 @@ function drawChart(
     ctx.textAlign = "start";
   }
 
-  if (readings.length < 2) return;
-
-  const firstTime = readings[0]!.time;
-  const lastTime = readings[readings.length - 1]!.time;
+  const firstTime = readings[0]?.time ?? 0;
+  const lastTime = readings[readings.length - 1]?.time ?? 0;
   const timeSpan = Math.max(1, lastTime - firstTime);
   const xForPoint = (point: Reading) => left + ((point.time - firstTime) / timeSpan) * plotWidth;
+
+  if (showTimeAxis) {
+    const tickCount = mobile ? 4 : 6;
+    const axisTop = bottom + Math.max(4, padding * 0.18);
+
+    ctx.strokeStyle = "#cbd5ce";
+    ctx.lineWidth = Math.max(1, Math.round(width / 1100));
+    ctx.beginPath();
+    ctx.moveTo(left, bottom + 0.5);
+    ctx.lineTo(left + plotWidth, bottom + 0.5);
+    ctx.stroke();
+
+    ctx.fillStyle = "#617066";
+    ctx.font = `${Math.max(10, Math.round(width / (mobile ? 84 : 105)))}px system-ui, sans-serif`;
+    ctx.textBaseline = "top";
+    ctx.textAlign = "center";
+
+    for (let index = 0; index <= tickCount; index += 1) {
+      const ratioPosition = index / tickCount;
+      const x = left + ratioPosition * plotWidth;
+      const elapsedMinutes = ((firstTime + timeSpan * ratioPosition - firstTime) / 60000);
+      const label = elapsedMinutes >= 10 ? String(Math.round(elapsedMinutes)) : elapsedMinutes.toFixed(elapsedMinutes >= 1 ? 1 : 0);
+
+      ctx.beginPath();
+      ctx.moveTo(x, bottom);
+      ctx.lineTo(x, bottom + Math.max(4, padding * 0.18));
+      ctx.stroke();
+      ctx.fillText(`${label}m`, x, axisTop);
+    }
+  }
+
+  if (readings.length < 2) return;
+
   const targetZone = zones.find((zone) => zone.id === targetZoneId) || zones[0]!;
 
   ctx.lineWidth = Math.max(3, Math.round(width / 360));
@@ -522,6 +602,29 @@ function ZoneEditor(props: ZoneEditorProps): JSX.Element {
   );
 }
 
+type ZoneTimeStatsProps = {
+  stats: Accessor<HeartRateStats>;
+  mobile: Accessor<boolean>;
+};
+
+function ZoneTimeStats(props: ZoneTimeStatsProps): JSX.Element {
+  return (
+    <div class={`mt-3 grid grid-cols-5 gap-2 ${props.mobile() ? "!mt-2 !gap-1" : ""}`} aria-label="Time in heart rate zones">
+      <For each={props.stats().zoneTimes}>
+        {(item) => (
+          <div class={`min-w-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2 ${props.mobile() ? "!p-[5px_6px]" : ""}`}>
+            <div class="mb-1 h-1.5 overflow-hidden rounded-full bg-[#e5ebe6]">
+              <div class="h-full rounded-full" style={{ width: `${item.percent}%`, background: item.zone.color }} />
+            </div>
+            <span class={`block truncate font-extrabold tabular-nums ${props.mobile() ? "text-[0.82rem]" : "text-[0.95rem]"}`}>{formatZoneDuration(item.durationMs)}</span>
+            <small class={`block truncate font-bold text-[#617066] ${props.mobile() ? "text-[0.62rem]" : "text-[0.72rem]"}`}>{item.zone.name}</small>
+          </div>
+        )}
+      </For>
+    </div>
+  );
+}
+
 export default function App() {
   const initialZoneState = loadZoneState();
   const [connectionStatus, setConnectionStatus] = createSignal("Idle");
@@ -565,7 +668,7 @@ export default function App() {
 
     return exerciseElapsedMs() + now() - exerciseStartedAt()!;
   });
-  const stats = createMemo<HeartRateStats>(() => getHeartRateStats(readings()));
+  const stats = createMemo<HeartRateStats>(() => getHeartRateStats(readings(), zones(), currentElapsedMs()));
   const latestZone = createMemo(() => {
     const rate = latestRate();
     return rate === null ? null : getZoneForRate(zones(), rate);
@@ -579,12 +682,13 @@ export default function App() {
   const selectedLogReadings = createMemo(() => selectedLog()?.readings || []);
   const selectedLogZones = createMemo(() => selectedLog()?.zones || zones());
   const selectedLogTargetZoneId = createMemo(() => selectedLog()?.targetZoneId || targetZoneId());
-  const selectedLogStats = createMemo<HeartRateStats>(() => getHeartRateStats(selectedLogReadings()));
+  const selectedLogStats = createMemo<HeartRateStats>(() => getHeartRateStats(selectedLogReadings(), selectedLogZones(), selectedLog()?.durationMs || 0));
   const displayReadings = createMemo(() => (detailView() === "log" ? selectedLogReadings() : readings()));
   const displayZones = createMemo(() => (detailView() === "log" ? selectedLogZones() : zones()));
   const displayTargetZoneId = createMemo(() => (detailView() === "log" ? selectedLogTargetZoneId() : targetZoneId()));
   const displayStats = createMemo(() => (detailView() === "log" ? selectedLogStats() : stats()));
   const displayDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : currentElapsedMs()));
+  const showLogTimeAxis = createMemo(() => detailView() === "log");
 
   createEffect(() => {
     saveZoneState(zones(), targetZoneId());
@@ -1091,7 +1195,8 @@ export default function App() {
           when={detailView() === "log"}
           fallback={
             <div class={`min-h-[574px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} />
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showLogTimeAxis} />
+              <ZoneTimeStats stats={displayStats} mobile={isMobile} />
               <ZoneEditor
                 zones={zones}
                 targetZoneId={targetZoneId}
@@ -1150,7 +1255,8 @@ export default function App() {
               </div>
             </div>
             <div class="min-w-0">
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} />
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showLogTimeAxis} />
+              <ZoneTimeStats stats={displayStats} mobile={isMobile} />
             </div>
           </div>
         </Show>
