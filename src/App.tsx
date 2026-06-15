@@ -1219,7 +1219,7 @@ export default function App() {
                         type="button"
                         onClick={() => setSelectedLogId(entry.id)}
                       >
-                        <span class="block text-[0.9rem] font-extrabold">{formatDateTime(entry.stoppedAt)}</span>
+                        <span class="block text-[0.9rem] font-extrabold">{formatDateTime(entry.startedAt)}</span>
                         <span class="block text-[0.78rem] font-bold">{formatDuration(entry.durationMs)} · {entry.readings.length} readings</span>
                       </button>
                     )}
