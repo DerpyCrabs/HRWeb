@@ -28,4 +28,3 @@ npm run build
 
 The graph keeps the full exercise instead of discarding older readings.
 Configure the five heart rate zones under the graph; they are saved in browser local storage.
-If the monitor sends RR intervals, exercise logs save them and show HRV as RMSSD in milliseconds.
