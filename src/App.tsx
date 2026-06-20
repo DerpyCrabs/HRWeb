@@ -32,6 +32,7 @@ type ExerciseLogEntry = {
   readings: Reading[];
   targetZoneId: number;
   zones: Zone[];
+  exerciseType?: string;
   hiddenAt?: number;
 };
 
@@ -192,8 +193,14 @@ function sanitizeLogEntry(value: unknown): ExerciseLogEntry | null {
     })),
     targetZoneId,
     zones: normalizeZones(entryZones.map((zone) => ({ ...zone }))),
+    exerciseType: typeof entry.exerciseType === "string" && entry.exerciseType.trim() ? entry.exerciseType.trim() : undefined,
     hiddenAt: Number.isFinite(entry.hiddenAt) ? entry.hiddenAt : undefined,
   };
+}
+
+function normalizeExerciseType(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function loadExerciseLog(): ExerciseLogEntry[] {
@@ -616,6 +623,74 @@ function ZoneEditor(props: ZoneEditorProps): JSX.Element {
   );
 }
 
+type ExerciseTypeInputProps = {
+  types: string[];
+  value: string;
+  listId: string;
+  placeholder?: string;
+  autofocus?: boolean;
+  onInput: (value: string) => void;
+  onConfirm: (value: string) => void;
+  onSkip?: () => void;
+  confirmLabel?: string;
+  compact?: boolean;
+};
+
+function ExerciseTypeInput(props: ExerciseTypeInputProps) {
+  let inputRef: HTMLInputElement | undefined;
+
+  onMount(() => {
+    if (props.autofocus) {
+      inputRef?.focus();
+    }
+  });
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      props.onConfirm(props.value);
+    }
+  };
+
+  return (
+    <div class={`grid gap-2 ${props.compact ? "" : "rounded-lg border border-[#dbe2dc] bg-white p-3"}`}>
+      <label class="text-[0.78rem] font-bold text-[#617066]" for={props.listId}>
+        Exercise type
+      </label>
+      <div class="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          id={props.listId}
+          class="min-h-9 min-w-0 flex-1 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-3 text-[0.9rem] font-semibold text-[#172019] outline-none focus:border-[#d9184b]/45"
+          type="text"
+          list={`${props.listId}-options`}
+          value={props.value}
+          placeholder={props.placeholder || "Select or enter type"}
+          onInput={(event) => props.onInput(event.currentTarget.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button
+          class={`${primaryButtonClass} !min-h-9 !shrink-0 !px-3 !text-[0.82rem]`}
+          type="button"
+          onClick={() => props.onConfirm(props.value)}
+        >
+          {props.confirmLabel || "Save"}
+        </button>
+        <Show when={props.onSkip}>
+          {(skip) => (
+            <button class={`${secondaryButtonClass} !min-h-9 !shrink-0 !px-3 !text-[0.82rem]`} type="button" onClick={skip()}>
+              Skip
+            </button>
+          )}
+        </Show>
+      </div>
+      <datalist id={`${props.listId}-options`}>
+        <For each={props.types}>{(type) => <option value={type} />}</For>
+      </datalist>
+    </div>
+  );
+}
+
 type ZoneTimeStatsProps = {
   stats: Accessor<HeartRateStats>;
   mobile: Accessor<boolean>;
@@ -662,6 +737,10 @@ export default function App() {
   const [exerciseLog, setExerciseLog] = createSignal<ExerciseLogEntry[]>(loadExerciseLog());
   const [selectedLogId, setSelectedLogId] = createSignal<string | null>(null);
   const [detailView, setDetailView] = createSignal<DetailView>("live");
+  const [logTypeFilter, setLogTypeFilter] = createSignal<string | null>(null);
+  const [typePickerEntryId, setTypePickerEntryId] = createSignal<string | null>(null);
+  const [typePickerDraft, setTypePickerDraft] = createSignal("");
+  const [editTypeDraft, setEditTypeDraft] = createSignal("");
   const [stopHoldProgress, setStopHoldProgress] = createSignal(0);
   const [deleteHoldProgress, setDeleteHoldProgress] = createSignal(0);
 
@@ -700,6 +779,26 @@ export default function App() {
     return rate === null ? null : getZoneForRate(zones(), rate);
   });
   const visibleExerciseLog = createMemo(() => exerciseLog().filter((entry) => !entry.hiddenAt));
+  const exerciseTypes = createMemo(() => {
+    const types = new Set<string>();
+    visibleExerciseLog().forEach((entry) => {
+      if (entry.exerciseType) {
+        types.add(entry.exerciseType);
+      }
+    });
+    return [...types].sort((first, second) => first.localeCompare(second));
+  });
+  const filteredExerciseLog = createMemo(() => {
+    const filter = logTypeFilter();
+    const entries = visibleExerciseLog();
+    if (filter === null) {
+      return entries;
+    }
+    if (filter === "__untyped__") {
+      return entries.filter((entry) => !entry.exerciseType);
+    }
+    return entries.filter((entry) => entry.exerciseType === filter);
+  });
   const selectedLog = createMemo(() => {
     const id = selectedLogId();
     const entries = visibleExerciseLog();
@@ -732,6 +831,19 @@ export default function App() {
     } else if (selectedLogId() && !entries.some((entry) => entry.id === selectedLogId())) {
       setSelectedLogId(entries[0]?.id || null);
     }
+  });
+
+  createEffect(() => {
+    logTypeFilter();
+    const filtered = filteredExerciseLog();
+    const selectedId = selectedLogId();
+    if (selectedId && filtered.length && !filtered.some((entry) => entry.id === selectedId)) {
+      setSelectedLogId(filtered[0]!.id);
+    }
+  });
+
+  createEffect(() => {
+    setEditTypeDraft(selectedLog()?.exerciseType || "");
   });
 
   onMount(() => {
@@ -943,6 +1055,27 @@ export default function App() {
     }
   }
 
+  function setExerciseType(entryId: string, value: string): void {
+    const exerciseType = normalizeExerciseType(value);
+    setExerciseLog((entries) =>
+      entries.map((entry) => (entry.id === entryId ? { ...entry, exerciseType } : entry)),
+    );
+  }
+
+  function confirmExerciseType(entryId: string, value: string): void {
+    setExerciseType(entryId, value);
+    setEditTypeDraft(normalizeExerciseType(value) || "");
+    if (typePickerEntryId() === entryId) {
+      setTypePickerEntryId(null);
+      setTypePickerDraft("");
+    }
+  }
+
+  function skipExerciseTypePicker(): void {
+    setTypePickerEntryId(null);
+    setTypePickerDraft("");
+  }
+
   function stopExercise() {
     if (exerciseState() !== "running" && exerciseState() !== "paused") return;
 
@@ -963,6 +1096,8 @@ export default function App() {
     setExerciseLog((entries) => [entry, ...entries]);
     setSelectedLogId(entry.id);
     setDetailView("log");
+    setTypePickerEntryId(entry.id);
+    setTypePickerDraft("");
     setReadings([]);
     setIdleStartedAt(null);
     setExerciseElapsedMs(0);
@@ -1257,9 +1392,26 @@ export default function App() {
         >
           <div class={`mt-5 grid min-h-[617px] grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!mt-2 !min-h-[520px] !gap-2" : ""}`}>
             <div class="flex min-h-[220px] flex-col rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2">
+              <Show when={visibleExerciseLog().length}>
+                <label class="mb-2 grid gap-1">
+                  <span class="text-[0.72rem] font-bold uppercase tracking-[0.04em] text-[#617066]">Filter by type</span>
+                  <select
+                    class="min-h-9 rounded-lg border border-[#dbe2dc] bg-white px-2.5 text-[0.85rem] font-bold text-[#172019]"
+                    value={logTypeFilter() ?? ""}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setLogTypeFilter(value === "" ? null : value);
+                    }}
+                  >
+                    <option value="">All types</option>
+                    <option value="__untyped__">Untyped</option>
+                    <For each={exerciseTypes()}>{(type) => <option value={type}>{type}</option>}</For>
+                  </select>
+                </label>
+              </Show>
               <Show when={visibleExerciseLog().length} fallback={<p class="m-0 p-3 text-sm font-semibold text-[#617066]">No exercises yet.</p>}>
                 <div class="grid gap-1.5">
-                  <For each={visibleExerciseLog()}>
+                  <For each={filteredExerciseLog()}>
                     {(entry) => (
                       <button
                         class={`rounded-md border px-3 py-2 text-left ${entry.id === selectedLog()?.id ? "border-[#d9184b]/35 bg-white text-[#172019]" : "border-transparent text-[#617066] hover:bg-white"}`}
@@ -1267,11 +1419,17 @@ export default function App() {
                         onClick={() => setSelectedLogId(entry.id)}
                       >
                         <span class="block text-[0.9rem] font-extrabold">{formatDateTime(entry.startedAt)}</span>
-                        <span class="block text-[0.78rem] font-bold">{formatDuration(entry.durationMs)} · {entry.readings.length} readings</span>
+                        <span class="block text-[0.78rem] font-bold">
+                          {formatDuration(entry.durationMs)} · {entry.readings.length} readings
+                          {entry.exerciseType ? ` · ${entry.exerciseType}` : ""}
+                        </span>
                       </button>
                     )}
                   </For>
                 </div>
+                <Show when={visibleExerciseLog().length && !filteredExerciseLog().length}>
+                  <p class="m-0 px-2 py-3 text-sm font-semibold text-[#617066]">No exercises match this type filter.</p>
+                </Show>
               </Show>
               <div class="mt-auto grid grid-cols-3 gap-2 border-t border-[#dbe2dc] pt-2">
                 <button class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" disabled={!visibleExerciseLog().length} onClick={exportExerciseLog}>Export</button>
@@ -1303,6 +1461,34 @@ export default function App() {
               </div>
             </div>
             <div class="min-w-0">
+              <Show when={selectedLog()}>
+                {(entry) => (
+                  <Show
+                    when={typePickerEntryId() === entry().id}
+                    fallback={
+                      <ExerciseTypeInput
+                        types={exerciseTypes()}
+                        value={editTypeDraft()}
+                        listId={`exercise-type-${entry().id}`}
+                        compact
+                        onInput={setEditTypeDraft}
+                        onConfirm={(value) => confirmExerciseType(entry().id, value)}
+                      />
+                    }
+                  >
+                    <ExerciseTypeInput
+                      types={exerciseTypes()}
+                      value={typePickerDraft()}
+                      listId={`exercise-type-picker-${entry().id}`}
+                      autofocus
+                      confirmLabel="Save"
+                      onInput={setTypePickerDraft}
+                      onConfirm={(value) => confirmExerciseType(entry().id, value)}
+                      onSkip={skipExerciseTypePicker}
+                    />
+                  </Show>
+                )}
+              </Show>
               <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
             </div>
