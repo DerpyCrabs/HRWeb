@@ -316,6 +316,7 @@ type HeartChartProps = {
   targetZoneId: Accessor<number>;
   mobile: Accessor<boolean>;
   showTimeAxis?: Accessor<boolean>;
+  durationMs?: Accessor<number>;
 };
 
 function HeartChart(props: HeartChartProps): JSX.Element {
@@ -325,11 +326,20 @@ function HeartChart(props: HeartChartProps): JSX.Element {
     const readings = props.readings();
     const zones = props.zones();
     const targetZoneId = props.targetZoneId();
-    drawChart(canvas, readings, zones, targetZoneId, props.mobile(), props.showTimeAxis?.() ?? false);
+    const durationMs = props.durationMs?.() ?? 0;
+    drawChart(canvas, readings, zones, targetZoneId, props.mobile(), props.showTimeAxis?.() ?? false, durationMs);
   });
 
   onMount(() => {
-    const resize = () => drawChart(canvas, props.readings(), props.zones(), props.targetZoneId(), props.mobile(), props.showTimeAxis?.() ?? false);
+    const resize = () => drawChart(
+      canvas,
+      props.readings(),
+      props.zones(),
+      props.targetZoneId(),
+      props.mobile(),
+      props.showTimeAxis?.() ?? false,
+      props.durationMs?.() ?? 0,
+    );
     window.addEventListener("resize", resize);
     onCleanup(() => window.removeEventListener("resize", resize));
   });
@@ -348,6 +358,7 @@ function drawChart(
   targetZoneId: number,
   mobile = false,
   showTimeAxis = false,
+  durationMs = 0,
 ): void {
   if (!canvas) return;
 
@@ -431,9 +442,11 @@ function drawChart(
   }
 
   const firstTime = readings[0]?.time ?? 0;
-  const lastTime = readings[readings.length - 1]?.time ?? 0;
-  const timeSpan = Math.max(1, lastTime - firstTime);
-  const xForPoint = (point: Reading) => left + ((point.time - firstTime) / timeSpan) * plotWidth;
+  const lastReadingTime = readings[readings.length - 1]?.time ?? 0;
+  const readingSpanMs = Math.max(1, lastReadingTime - firstTime);
+  const minWindowMs = durationMs < 60_000 ? Math.max(durationMs, 10_000) : 60_000;
+  const axisMaxMs = Math.max(minWindowMs, durationMs, lastReadingTime, 1);
+  const xForPoint = (point: Reading) => left + ((point.time - firstTime) / readingSpanMs) * plotWidth;
 
   if (showTimeAxis) {
     const tickCount = mobile ? 4 : 6;
@@ -454,7 +467,7 @@ function drawChart(
     for (let index = 0; index <= tickCount; index += 1) {
       const ratioPosition = index / tickCount;
       const x = left + ratioPosition * plotWidth;
-      const elapsedMinutes = ((firstTime + timeSpan * ratioPosition - firstTime) / 60000);
+      const elapsedMinutes = (axisMaxMs * ratioPosition) / 60_000;
       const label = elapsedMinutes >= 10 ? String(Math.round(elapsedMinutes)) : elapsedMinutes.toFixed(elapsedMinutes >= 1 ? 1 : 0);
 
       ctx.beginPath();
@@ -639,6 +652,7 @@ export default function App() {
   const [exerciseElapsedMs, setExerciseElapsedMs] = createSignal(0);
   const [exerciseStartedAt, setExerciseStartedAt] = createSignal<number | null>(null);
   const [exerciseSessionStartedAt, setExerciseSessionStartedAt] = createSignal<number | null>(null);
+  const [idleStartedAt, setIdleStartedAt] = createSignal<number | null>(null);
   const [now, setNow] = createSignal(Date.now());
   const [zones, setZones] = createSignal<Zone[]>(initialZoneState.zones);
   const [targetZoneId, setTargetZoneId] = createSignal(initialZoneState.targetZoneId);
@@ -659,7 +673,6 @@ export default function App() {
   let deleteHoldTimer: number | undefined;
   let deleteHoldFrame: number | undefined;
   let deleteHoldStartedAt = 0;
-  let idleReadingsStartedAt: number | null = null;
 
   const connected = createMemo(() => Boolean(device()?.gatt?.connected && characteristic()));
   const currentElapsedMs = createMemo(() => {
@@ -669,7 +682,19 @@ export default function App() {
 
     return exerciseElapsedMs() + now() - exerciseStartedAt()!;
   });
-  const stats = createMemo<HeartRateStats>(() => getHeartRateStats(readings(), zones(), currentElapsedMs()));
+  const liveElapsedMs = createMemo(() => {
+    if (exerciseState() === "running") {
+      return currentElapsedMs();
+    }
+
+    if (exerciseState() === "paused") {
+      return exerciseElapsedMs();
+    }
+
+    const startedAt = idleStartedAt();
+    return startedAt === null ? 0 : now() - startedAt;
+  });
+  const stats = createMemo<HeartRateStats>(() => getHeartRateStats(readings(), zones(), liveElapsedMs()));
   const latestZone = createMemo(() => {
     const rate = latestRate();
     return rate === null ? null : getZoneForRate(zones(), rate);
@@ -688,8 +713,9 @@ export default function App() {
   const displayZones = createMemo(() => (detailView() === "log" ? selectedLogZones() : zones()));
   const displayTargetZoneId = createMemo(() => (detailView() === "log" ? selectedLogTargetZoneId() : targetZoneId()));
   const displayStats = createMemo(() => (detailView() === "log" ? selectedLogStats() : stats()));
-  const displayDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : currentElapsedMs()));
-  const showLogTimeAxis = createMemo(() => detailView() === "log");
+  const displayDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : liveElapsedMs()));
+  const displayChartDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : liveElapsedMs()));
+  const showTimeAxis = () => true;
 
   createEffect(() => {
     saveZoneState(zones(), targetZoneId());
@@ -717,7 +743,10 @@ export default function App() {
   });
 
   createEffect(() => {
-    if (exerciseState() !== "running") return;
+    if (detailView() !== "live") return;
+
+    const shouldTick = exerciseState() === "running" || (exerciseState() === "idle" && connected() && idleStartedAt() !== null);
+    if (!shouldTick) return;
 
     const timer = window.setInterval(() => setNow(Date.now()), 250);
     onCleanup(() => window.clearInterval(timer));
@@ -758,8 +787,12 @@ export default function App() {
     if (exerciseState() !== "running") {
       if (exerciseState() === "idle") {
         const receivedAt = Date.now();
-        idleReadingsStartedAt ??= receivedAt;
-        setReadings((items) => [...items, { bpm: rounded, time: receivedAt - idleReadingsStartedAt! }]);
+        const startedAt = idleStartedAt() ?? receivedAt;
+        if (idleStartedAt() === null) {
+          setIdleStartedAt(startedAt);
+          setNow(receivedAt);
+        }
+        setReadings((items) => [...items, { bpm: rounded, time: receivedAt - startedAt }]);
         setLastRate(rounded);
       }
 
@@ -829,6 +862,11 @@ export default function App() {
       setCharacteristic(nextCharacteristic);
       setStatus("Live", "live");
       setMessage("Connected.");
+      if (exerciseState() === "idle") {
+        const startedAt = Date.now();
+        setIdleStartedAt(startedAt);
+        setNow(startedAt);
+      }
     } catch (error) {
       const bluetoothError = error as Error;
       setStatus("Idle");
@@ -862,6 +900,8 @@ export default function App() {
     setMessage("Disconnected.");
     setCharacteristic(null);
     notificationCharacteristic = null;
+    setIdleStartedAt(null);
+    setReadings([]);
   }
 
   function startExercise() {
@@ -873,7 +913,7 @@ export default function App() {
     const startedAt = Date.now();
     setReadings([]);
     setLastRate(null);
-    idleReadingsStartedAt = null;
+    setIdleStartedAt(null);
     setExerciseElapsedMs(0);
     setExerciseStartedAt(startedAt);
     setExerciseSessionStartedAt(startedAt);
@@ -923,13 +963,20 @@ export default function App() {
     setExerciseLog((entries) => [entry, ...entries]);
     setSelectedLogId(entry.id);
     setDetailView("log");
-    setExerciseElapsedMs(durationMs);
+    setReadings([]);
+    setIdleStartedAt(null);
+    setExerciseElapsedMs(0);
     setExerciseStartedAt(null);
     setExerciseSessionStartedAt(null);
-    setExerciseState("stopped");
-    setStatus(connected() ? "Live" : "Stopped", connected() ? "live" : "warn");
+    setExerciseState("idle");
+    setStatus(connected() ? "Live" : "Disconnected", connected() ? "live" : "warn");
     setMessage("");
-    setTrend(readings().length ? "Done" : "Stopped");
+    setTrend(currentReadings.length ? "Done" : "Idle");
+    if (connected()) {
+      const previewStartedAt = Date.now();
+      setIdleStartedAt(previewStartedAt);
+      setNow(previewStartedAt);
+    }
   }
 
   function cancelStopHold(): void {
@@ -1196,7 +1243,7 @@ export default function App() {
           when={detailView() === "log"}
           fallback={
             <div class={`min-h-[617px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showLogTimeAxis} />
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
               <ZoneEditor
                 zones={zones}
@@ -1256,7 +1303,7 @@ export default function App() {
               </div>
             </div>
             <div class="min-w-0">
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showLogTimeAxis} />
+              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
             </div>
           </div>
