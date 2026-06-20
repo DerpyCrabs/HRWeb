@@ -1,5 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { Accessor, JSX } from "solid-js";
+import MetricsView from "./MetricsView";
+import { calculateWorkoutHrr, matchesHrrType } from "./metrics";
 
 type Zone = {
   id: number;
@@ -43,7 +45,7 @@ type StoredExerciseLog = {
 
 type StatusMode = "muted" | "warn" | "live";
 type ExerciseState = "idle" | "running" | "paused" | "stopped";
-type DetailView = "live" | "log";
+type DetailView = "live" | "log" | "metrics";
 
 type StatValue = number | "--";
 
@@ -105,6 +107,12 @@ const DEFAULT_ZONES: Zone[] = [
 ];
 
 const cardClass = "rounded-lg border border-[#dbe2dc]/90 bg-white/95 shadow-[0_18px_45px_rgba(24,31,27,0.11)]";
+const detailContentClass = (mobile: boolean) =>
+  `mt-5 min-h-[617px] ${mobile ? "!mt-2 !min-h-[520px]" : ""}`;
+const metricsContentClass = (mobile: boolean) =>
+  mobile
+    ? `${detailContentClass(mobile)} min-w-0 overflow-x-hidden`
+    : `${detailContentClass(mobile)} max-h-[617px] min-w-0 overflow-y-auto`;
 const primaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-transparent bg-[#d9184b] px-4 text-center text-[1rem] font-extrabold leading-none text-white hover:bg-[#a80f37] disabled:cursor-not-allowed disabled:opacity-50";
 const secondaryButtonClass = "flex min-h-[46px] cursor-pointer items-center justify-center rounded-lg border border-[#dbe2dc] bg-white px-4 text-center text-[0.95rem] font-bold leading-none text-[#172019] hover:not-disabled:border-[#aebcaf] hover:not-disabled:bg-[#fbfcfb] disabled:cursor-not-allowed disabled:border-[#e5ebe6] disabled:bg-[#fbfcfb] disabled:text-[#9aa39c]";
 const statTileClass = "min-w-16 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-2.5 py-2 text-right";
@@ -358,6 +366,15 @@ function HeartChart(props: HeartChartProps): JSX.Element {
   );
 }
 
+function chartFont(cssWidth: number, ratio: number, minPx: number, divisor: number, weight = 400): string {
+  const size = Math.max(minPx, Math.round(cssWidth / divisor));
+  return `${weight} ${size * ratio}px system-ui, sans-serif`;
+}
+
+function chartAxisLabelPx(cssWidth: number, mobile: boolean): number {
+  return Math.max(mobile ? 11 : 12, Math.round(cssWidth / (mobile ? 58 : 52)));
+}
+
 function drawChart(
   canvas: HTMLCanvasElement | undefined,
   readings: Reading[],
@@ -374,7 +391,8 @@ function drawChart(
 
   const rect = canvas.getBoundingClientRect();
   const ratio = window.devicePixelRatio || 1;
-  const width = Math.round(rect.width * ratio);
+  const cssWidth = rect.width;
+  const width = Math.round(cssWidth * ratio);
   const height = Math.round(rect.height * ratio);
 
   if (canvas.width !== width || canvas.height !== height) {
@@ -382,10 +400,14 @@ function drawChart(
     canvas.height = height;
   }
 
-  const padding = mobile ? Math.max(20, Math.round(width * 0.035)) : Math.max(34, Math.round(width * 0.04));
+  const basePadding = mobile ? Math.max(20, Math.round(cssWidth * 0.035)) : Math.max(34, Math.round(cssWidth * 0.04));
+  const xLabelPx = chartAxisLabelPx(cssWidth, mobile);
+  const padding = basePadding * ratio;
   const left = mobile ? (showTimeAxis ? padding * 1.4 : 0) : padding;
   const right = mobile ? (showTimeAxis ? padding * 0.55 : 0) : padding * 0.5;
-  const bottomPadding = mobile ? (showTimeAxis ? padding * 1.55 : 0) : (showTimeAxis ? padding * 1.45 : padding * 1.1);
+  const bottomPadding = mobile
+    ? (showTimeAxis ? (basePadding + xLabelPx * 1.55) * ratio : 0)
+    : (showTimeAxis ? (basePadding + xLabelPx * 1.55) * ratio : padding * 1.1);
   const top = mobile ? 0 : padding * 0.55;
   const plotWidth = width - left - right;
   const plotHeight = height - top - bottomPadding;
@@ -428,7 +450,7 @@ function drawChart(
 
   if (!mobile) {
     ctx.fillStyle = "#617066";
-    ctx.font = `${Math.max(12, Math.round(width / 95))}px system-ui, sans-serif`;
+    ctx.font = chartFont(cssWidth, ratio, 11, 88);
     ctx.textBaseline = "middle";
     ctx.textAlign = "right";
 
@@ -442,7 +464,7 @@ function drawChart(
     ];
 
     boundaryLabels.forEach((boundary) => {
-      ctx.fillText(String(boundary.label), left - 8, yForBpm(boundary.value));
+      ctx.fillText(String(boundary.label), left - 8 * ratio, yForBpm(boundary.value));
     });
 
     ctx.textAlign = "start";
@@ -457,31 +479,41 @@ function drawChart(
 
   if (showTimeAxis) {
     const tickCount = mobile ? 4 : 6;
-    const axisTop = bottom + Math.max(4, padding * 0.18);
+    const axisTop = bottom + Math.max(4 * ratio, padding * 0.18);
+    const plotRight = left + plotWidth;
 
     ctx.strokeStyle = "#cbd5ce";
     ctx.lineWidth = Math.max(1, Math.round(width / 1100));
     ctx.beginPath();
     ctx.moveTo(left, bottom + 0.5);
-    ctx.lineTo(left + plotWidth, bottom + 0.5);
+    ctx.lineTo(plotRight, bottom + 0.5);
     ctx.stroke();
 
     ctx.fillStyle = "#617066";
-    ctx.font = `${Math.max(10, Math.round(width / (mobile ? 84 : 105)))}px system-ui, sans-serif`;
+    ctx.font = chartFont(cssWidth, ratio, 12, mobile ? 58 : 52, 600);
     ctx.textBaseline = "top";
-    ctx.textAlign = "center";
 
     for (let index = 0; index <= tickCount; index += 1) {
       const ratioPosition = index / tickCount;
       const x = left + ratioPosition * plotWidth;
       const elapsedMinutes = (axisMaxMs * ratioPosition) / 60_000;
-      const label = elapsedMinutes >= 10 ? String(Math.round(elapsedMinutes)) : elapsedMinutes.toFixed(elapsedMinutes >= 1 ? 1 : 0);
+      const label = `${elapsedMinutes >= 10 ? String(Math.round(elapsedMinutes)) : elapsedMinutes.toFixed(elapsedMinutes >= 1 ? 1 : 0)}m`;
 
       ctx.beginPath();
       ctx.moveTo(x, bottom);
-      ctx.lineTo(x, bottom + Math.max(4, padding * 0.18));
+      ctx.lineTo(x, bottom + Math.max(4 * ratio, padding * 0.18));
       ctx.stroke();
-      ctx.fillText(`${label}m`, x, axisTop);
+
+      if (index === 0) {
+        ctx.textAlign = "left";
+        ctx.fillText(label, left, axisTop);
+      } else if (index === tickCount) {
+        ctx.textAlign = "right";
+        ctx.fillText(label, plotRight, axisTop);
+      } else {
+        ctx.textAlign = "center";
+        ctx.fillText(label, x, axisTop);
+      }
     }
   }
 
@@ -814,7 +846,13 @@ export default function App() {
   const displayStats = createMemo(() => (detailView() === "log" ? selectedLogStats() : stats()));
   const displayDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : liveElapsedMs()));
   const displayChartDurationMs = createMemo(() => (detailView() === "log" ? selectedLog()?.durationMs || 0 : liveElapsedMs()));
+  const selectedLogHrr = createMemo(() => {
+    const entry = selectedLog();
+    return entry && matchesHrrType(entry.exerciseType) ? calculateWorkoutHrr(entry) : null;
+  });
   const showTimeAxis = () => true;
+  const viewTabClass = (view: DetailView) =>
+    `min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === view ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`;
 
   createEffect(() => {
     saveZoneState(zones(), targetZoneId());
@@ -1212,13 +1250,14 @@ export default function App() {
         throw new Error("No valid exercise entries were found.");
       }
 
-      const merged = new Map<string, ExerciseLogEntry>();
-      [...nextEntries, ...exerciseLog()].forEach((entry) => merged.set(entry.id, entry));
-      const sorted = [...merged.values()].sort((first, second) => second.stoppedAt - first.stoppedAt);
+      const sorted = [...nextEntries].sort((first, second) => second.stoppedAt - first.stoppedAt);
       setExerciseLog(sorted);
       setSelectedLogId(sorted[0]?.id || null);
+      setLogTypeFilter(null);
+      setTypePickerEntryId(null);
+      setTypePickerDraft("");
       setDetailView("log");
-      setMessage(`Imported ${nextEntries.length} exercise${nextEntries.length === 1 ? "" : "s"}.`);
+      setMessage(`Replaced log with ${nextEntries.length} exercise${nextEntries.length === 1 ? "" : "s"}.`);
     } catch (error) {
       setMessage((error as Error).message || "Could not import exercise log.");
     } finally {
@@ -1341,9 +1380,10 @@ export default function App() {
         <div class={`flex items-start justify-between gap-4 ${isMobile() ? "block" : ""}`}>
           <Show when={!isMobile()}>
             <div>
-              <div id="chart-title" class="grid grid-cols-2 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
-                <button class={`min-h-9 rounded-md px-4 text-[0.9rem] font-extrabold ${detailView() === "live" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("live")}>Live</button>
-                <button class={`min-h-9 rounded-md px-4 text-[0.9rem] font-extrabold ${detailView() === "log" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("log")}>Log</button>
+              <div id="chart-title" class="grid grid-cols-3 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
+                <button class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
+                <button class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
+                <button class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
               </div>
             </div>
           </Show>
@@ -1368,29 +1408,38 @@ export default function App() {
         </div>
 
         <Show when={isMobile()}>
-          <div class="mt-2 grid grid-cols-2 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
-            <button class={`min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === "live" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("live")}>Live</button>
-            <button class={`min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === "log" ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`} type="button" onClick={() => setDetailView("log")}>Log</button>
+          <div class="mt-2 grid grid-cols-3 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
+            <button class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
+            <button class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
+            <button class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
+          </div>
+        </Show>
+
+        <Show when={detailView() === "metrics"}>
+          <div class={metricsContentClass(isMobile())}>
+            <MetricsView entries={visibleExerciseLog} mobile={isMobile} />
           </div>
         </Show>
 
         <Show
           when={detailView() === "log"}
           fallback={
-            <div class={`min-h-[617px] ${isMobile() ? "!min-h-[520px]" : ""}`}>
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
-              <ZoneTimeStats stats={displayStats} mobile={isMobile} />
-              <ZoneEditor
-                zones={zones}
-                targetZoneId={targetZoneId}
-                mobile={isMobile}
-                onZonesChange={updateZones}
-                onTargetChange={updateTargetZone}
-              />
-            </div>
+            <Show when={detailView() === "live"}>
+              <div class={detailContentClass(isMobile())}>
+                <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
+                <ZoneTimeStats stats={displayStats} mobile={isMobile} />
+                <ZoneEditor
+                  zones={zones}
+                  targetZoneId={targetZoneId}
+                  mobile={isMobile}
+                  onZonesChange={updateZones}
+                  onTargetChange={updateTargetZone}
+                />
+              </div>
+            </Show>
           }
         >
-          <div class={`mt-5 grid min-h-[617px] grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!mt-2 !min-h-[520px] !gap-2" : ""}`}>
+          <div class={`${detailContentClass(isMobile())} grid grid-cols-[minmax(180px,260px)_1fr] gap-3 max-[940px]:grid-cols-1 ${isMobile() ? "!gap-2" : ""}`}>
             <div class="flex min-h-[220px] flex-col rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2">
               <Show when={visibleExerciseLog().length}>
                 <label class="mb-2 grid gap-1">
@@ -1488,6 +1537,14 @@ export default function App() {
                     />
                   </Show>
                 )}
+              </Show>
+              <Show when={selectedLogHrr() !== null}>
+                <div class={`mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2 ${isMobile() ? "!mb-1.5" : ""}`}>
+                  <div class={`${statTileClass} text-left ${isMobile() ? "!min-w-0 !p-[5px_8px]" : ""}`}>
+                    <span class="block text-[1.05rem] font-extrabold tabular-nums text-[#f77f00]">−{selectedLogHrr()} bpm</span>
+                    <small class="block font-bold text-[#617066]">HRR 1 min</small>
+                  </div>
+                </div>
               </Show>
               <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
