@@ -784,8 +784,12 @@ export default function App() {
   let deleteHoldTimer: number | undefined;
   let deleteHoldFrame: number | undefined;
   let deleteHoldStartedAt = 0;
+  let simulateInterval: number | undefined;
+  let simulateBpm = 100;
+  let simulateTarget = 100;
 
-  const connected = createMemo(() => Boolean(device()?.gatt?.connected && characteristic()));
+  const [simulatedConnected, setSimulatedConnected] = createSignal(false);
+  const connected = createMemo(() => simulatedConnected() || Boolean(device()?.gatt?.connected && characteristic()));
   const currentElapsedMs = createMemo(() => {
     if (exerciseState() !== "running" || exerciseStartedAt() === null) {
       return exerciseElapsedMs();
@@ -890,6 +894,24 @@ export default function App() {
     update();
     query.addEventListener("change", update);
     onCleanup(() => query.removeEventListener("change", update));
+
+    if (import.meta.env.DEV) {
+      const handleDevHotkey = (event: KeyboardEvent) => {
+        if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey || event.key.toLowerCase() !== "h") {
+          return;
+        }
+
+        event.preventDefault();
+        if (simulatedConnected()) {
+          disconnectMonitor();
+        } else if (!connected()) {
+          connectSimulatedMonitor();
+        }
+      };
+
+      window.addEventListener("keydown", handleDevHotkey);
+      onCleanup(() => window.removeEventListener("keydown", handleDevHotkey));
+    }
   });
 
   createEffect(() => {
@@ -906,6 +928,7 @@ export default function App() {
     if (notificationCharacteristic) {
       notificationCharacteristic.removeEventListener("characteristicvaluechanged", handleHeartRateNotification);
     }
+    stopSimulatedMonitor();
     cancelStopHold();
     cancelDeleteHold();
   });
@@ -977,6 +1000,66 @@ export default function App() {
     }
   }
 
+  function pickSimulatedTargetBpm(zoneList: Zone[]): number {
+    const zone = zoneList[Math.floor(Math.random() * zoneList.length)]!;
+    return zone.min + Math.random() * (zone.max - zone.min);
+  }
+
+  function connectSimulatedMonitor(): void {
+    if (!import.meta.env.DEV || connected()) {
+      return;
+    }
+
+    const zoneList = zones();
+    simulateBpm = pickSimulatedTargetBpm(zoneList);
+    simulateTarget = simulateBpm;
+
+    setSimulatedConnected(true);
+    setStatus("Live", "live");
+    setMessage("Simulated monitor (Ctrl+Shift+H).");
+    if (exerciseState() === "idle") {
+      const startedAt = Date.now();
+      setIdleStartedAt(startedAt);
+      setNow(startedAt);
+    }
+
+    addReading(simulateBpm);
+
+    simulateInterval = window.setInterval(() => {
+      const currentZones = zones();
+      if (!currentZones.length) {
+        return;
+      }
+
+      if (Math.random() < 0.05) {
+        simulateTarget = pickSimulatedTargetBpm(currentZones);
+      }
+
+      simulateBpm += (simulateTarget - simulateBpm) * 0.12 + (Math.random() - 0.5) * 5;
+      const minBpm = currentZones[0]!.min;
+      const maxBpm = currentZones[currentZones.length - 1]!.max;
+      simulateBpm = Math.max(minBpm, Math.min(maxBpm, simulateBpm));
+      addReading(simulateBpm);
+    }, 1000);
+  }
+
+  function stopSimulatedMonitor(): void {
+    if (simulateInterval !== undefined) {
+      window.clearInterval(simulateInterval);
+      simulateInterval = undefined;
+    }
+
+    if (!simulatedConnected()) {
+      return;
+    }
+
+    setSimulatedConnected(false);
+    setStatus("Disconnected", "warn");
+    setMessage("Simulated monitor disconnected.");
+    setIdleStartedAt(null);
+    setReadings([]);
+  }
+
   async function connectMonitor() {
     if (!("bluetooth" in navigator)) {
       setStatus("Unsupported", "warn");
@@ -1027,6 +1110,11 @@ export default function App() {
   async function disconnectMonitor() {
     if (exerciseState() === "running") {
       pauseExercise();
+    }
+
+    if (simulatedConnected()) {
+      stopSimulatedMonitor();
+      return;
     }
 
     if (notificationCharacteristic) {
