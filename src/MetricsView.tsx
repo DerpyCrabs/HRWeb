@@ -375,7 +375,7 @@ function TypeMetricsSection(props: TypeMetricsSectionProps): JSX.Element {
   const trimpBars = createMemo(() => buildTrimpBars(props.entries));
 
   return (
-    <section class="min-w-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-4">
+    <section class="min-w-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-4" data-testid={`metrics-section-${props.type.replace(/\s+/g, "-").toLowerCase()}`}>
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 class="m-0 text-[1.05rem] font-extrabold text-[#172019]">{props.type}</h3>
         <span class="text-[0.78rem] font-bold text-[#617066]">{props.entries.length} workout{props.entries.length === 1 ? "" : "s"}</span>
@@ -383,7 +383,7 @@ function TypeMetricsSection(props: TypeMetricsSectionProps): JSX.Element {
 
       <div class="grid gap-4">
         <Show when={metrics().includes("zone2")}>
-          <article class="min-w-0">
+          <article class="min-w-0" data-testid="metrics-zone2-chart">
             <div class="mb-2">
               <p class="m-0 text-[0.82rem] font-extrabold uppercase tracking-[0.03em] text-[#617066]">Zone 2 adherence</p>
               <p class="m-0 mt-0.5 text-[0.78rem] font-semibold text-[#617066]">Share of session time in Zone 2 — aerobic base expansion</p>
@@ -393,7 +393,7 @@ function TypeMetricsSection(props: TypeMetricsSectionProps): JSX.Element {
         </Show>
 
         <Show when={metrics().includes("hrr")}>
-          <article class="min-w-0">
+          <article class="min-w-0" data-testid="metrics-hrr-chart">
             <div class="mb-2">
               <p class="m-0 text-[0.82rem] font-extrabold uppercase tracking-[0.03em] text-[#617066]">HRR 1 min</p>
               <p class="m-0 mt-0.5 text-[0.78rem] font-semibold text-[#617066]">Peak HR minus HR one minute later — parasympathetic recovery</p>
@@ -403,7 +403,7 @@ function TypeMetricsSection(props: TypeMetricsSectionProps): JSX.Element {
         </Show>
 
         <Show when={metrics().includes("trimp")}>
-          <article class="min-w-0">
+          <article class="min-w-0" data-testid="metrics-trimp-chart">
             <div class="mb-2">
               <p class="m-0 text-[0.82rem] font-extrabold uppercase tracking-[0.03em] text-[#617066]">Training load (TRIMP)</p>
               <p class="m-0 mt-0.5 text-[0.78rem] font-semibold text-[#617066]">Cumulative stress: time in each zone × zone coefficient</p>
@@ -426,12 +426,13 @@ function MetricsView(props: MetricsViewProps): JSX.Element {
   const typeGroups = createMemo(() => groupEntriesByType(props.entries()));
 
   return (
-    <div class="min-w-0 space-y-4">
+    <div class="min-w-0 space-y-4" data-testid="metrics-view">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="m-0 text-[0.95rem] font-extrabold text-[#172019]">Metrics by exercise type</p>
         <label class="grid gap-1">
           <span class="text-[0.72rem] font-bold uppercase tracking-[0.04em] text-[#617066]">Trend grouping</span>
           <select
+            data-testid="metrics-grouping"
             class="min-h-9 rounded-lg border border-[#dbe2dc] bg-white px-2.5 text-[0.85rem] font-bold text-[#172019]"
             value={grouping()}
             onChange={(event) => setGrouping(event.currentTarget.value as MetricGrouping)}
@@ -442,7 +443,7 @@ function MetricsView(props: MetricsViewProps): JSX.Element {
         </label>
       </div>
 
-      <Show when={typeGroups().length} fallback={<p class="m-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-4 text-sm font-semibold text-[#617066]">Complete a workout and assign an exercise type to see metrics.</p>}>
+      <Show when={typeGroups().length} fallback={<p data-testid="metrics-empty" class="m-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-4 text-sm font-semibold text-[#617066]">Complete a workout and assign an exercise type to see metrics.</p>}>
         <For each={typeGroups()}>
           {(group) => (
             <TypeMetricsSection type={group.type} entries={group.entries} grouping={grouping} mobile={props.mobile} />

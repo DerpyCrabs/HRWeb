@@ -361,7 +361,7 @@ function HeartChart(props: HeartChartProps): JSX.Element {
 
   return (
     <div class={`mt-5 w-full aspect-[16/9] min-h-[360px] ${props.mobile() ? "!mt-2" : ""}`}>
-      <canvas ref={canvas} class="block h-full w-full rounded-lg border border-[#dbe2dc] bg-[#fffdfa]" width="1200" height="520" aria-label="Heart rate line chart" />
+      <canvas ref={canvas} data-testid="heart-chart" class="block h-full w-full rounded-lg border border-[#dbe2dc] bg-[#fffdfa]" width="1200" height="520" aria-label="Heart rate line chart" />
     </div>
   );
 }
@@ -613,6 +613,7 @@ function ZoneEditor(props: ZoneEditorProps): JSX.Element {
             <For each={props.zones()}>
               {(zone) => (
                 <button
+                  data-testid={`zone-target-${zone.id}`}
                   class={`min-w-[18px] cursor-pointer border-0 p-0 text-transparent ${zone.id === props.targetZoneId() ? "opacity-100 shadow-[inset_0_0_0_3px_rgba(23,32,25,0.28)]" : "opacity-75"}`}
                   type="button"
                   style={{ background: zone.color, "flex-basis": `${((zone.max - zone.min + 1) / span()) * 100}%` }}
@@ -626,6 +627,7 @@ function ZoneEditor(props: ZoneEditorProps): JSX.Element {
           <For each={props.zones().slice(0, -1)}>
             {(zone, index) => (
               <button
+                data-testid={`zone-boundary-${index()}`}
                 class="absolute h-10 w-[18px] -translate-x-1/2 cursor-ew-resize touch-none rounded-full border-2 border-white bg-[#172019] text-white shadow-[0_4px_12px_rgba(23,32,25,0.22)]"
                 type="button"
                 role="slider"
@@ -693,6 +695,7 @@ function ExerciseTypeInput(props: ExerciseTypeInputProps) {
         <input
           ref={inputRef}
           id={props.listId}
+          data-testid="exercise-type-input"
           class="min-h-9 min-w-0 flex-1 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] px-3 text-[0.9rem] font-semibold text-[#172019] outline-none focus:border-[#d9184b]/45"
           type="text"
           list={`${props.listId}-options`}
@@ -702,6 +705,7 @@ function ExerciseTypeInput(props: ExerciseTypeInputProps) {
           onKeyDown={handleKeyDown}
         />
         <button
+          data-testid="exercise-type-save"
           class={`${primaryButtonClass} !min-h-9 !shrink-0 !px-3 !text-[0.82rem]`}
           type="button"
           onClick={() => props.onConfirm(props.value)}
@@ -710,7 +714,7 @@ function ExerciseTypeInput(props: ExerciseTypeInputProps) {
         </button>
         <Show when={props.onSkip}>
           {(skip) => (
-            <button class={`${secondaryButtonClass} !min-h-9 !shrink-0 !px-3 !text-[0.82rem]`} type="button" onClick={skip()}>
+            <button data-testid="exercise-type-skip" class={`${secondaryButtonClass} !min-h-9 !shrink-0 !px-3 !text-[0.82rem]`} type="button" onClick={skip()}>
               Skip
             </button>
           )}
@@ -730,7 +734,7 @@ type ZoneTimeStatsProps = {
 
 function ZoneTimeStats(props: ZoneTimeStatsProps): JSX.Element {
   return (
-    <div class={`mt-3 grid grid-cols-5 gap-2 ${props.mobile() ? "!mt-2 !gap-1" : ""}`} aria-label="Time in heart rate zones">
+    <div class={`mt-3 grid grid-cols-5 gap-2 ${props.mobile() ? "!mt-2 !gap-1" : ""}`} aria-label="Time in heart rate zones" data-testid="zone-time-stats">
       <For each={props.stats().zoneTimes}>
         {(item) => (
           <div class={`min-w-0 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-2 ${props.mobile() ? "!p-[5px_6px]" : ""}`}>
@@ -896,6 +900,16 @@ export default function App() {
     onCleanup(() => query.removeEventListener("change", update));
 
     if (import.meta.env.DEV) {
+      (window as Window & {
+        __HRWEB_TEST__?: {
+          connectSimulated: () => void;
+          disconnectSimulated: () => void;
+        };
+      }).__HRWEB_TEST__ = {
+        connectSimulated: connectSimulatedMonitor,
+        disconnectSimulated: disconnectMonitor,
+      };
+
       const handleDevHotkey = (event: KeyboardEvent) => {
         if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey || event.key.toLowerCase() !== "h") {
           return;
@@ -910,7 +924,10 @@ export default function App() {
       };
 
       window.addEventListener("keydown", handleDevHotkey);
-      onCleanup(() => window.removeEventListener("keydown", handleDevHotkey));
+      onCleanup(() => {
+        window.removeEventListener("keydown", handleDevHotkey);
+        delete (window as Window & { __HRWEB_TEST__?: unknown }).__HRWEB_TEST__;
+      });
     }
   });
 
@@ -1410,26 +1427,27 @@ export default function App() {
             <div>
               <h1 id="app-title" class="m-0 max-w-[250px] text-[clamp(2rem,5vw,3.5rem)] leading-[0.98] tracking-normal">Heart Rate Monitor</h1>
             </div>
-            <span class={`flex-none rounded-full border px-2.5 py-1.5 text-[0.78rem] font-bold ${statusMode() === "live" ? "border-[#087f5b]/25 bg-[#087f5b]/10 text-[#087f5b]" : statusMode() === "warn" ? "border-[#986b00]/30 bg-[#986b00]/10 text-[#986b00]" : "border-[#dbe2dc] bg-[#f9faf8] text-[#617066]"}`}>{connectionStatus()}</span>
+            <span data-testid="connection-status" class={`flex-none rounded-full border px-2.5 py-1.5 text-[0.78rem] font-bold ${statusMode() === "live" ? "border-[#087f5b]/25 bg-[#087f5b]/10 text-[#087f5b]" : statusMode() === "warn" ? "border-[#986b00]/30 bg-[#986b00]/10 text-[#986b00]" : "border-[#dbe2dc] bg-[#f9faf8] text-[#617066]"}`}>{connectionStatus()}</span>
           </div>
         </Show>
 
         <div class={`my-auto mb-8 max-[820px]:my-[34px] max-[820px]:mb-7 ${isMobile() ? "!m-0 !mb-2.5" : ""}`} aria-live="polite">
           <div>
-            <span class={`text-[clamp(5.5rem,18vw,10.5rem)] font-extrabold leading-[0.9] tracking-normal tabular-nums ${isMobile() ? "!text-[clamp(8.8rem,38vw,12rem)] !leading-[0.82]" : ""}`} style={{ color: latestZone()?.color || "#172019" }}>{latestRate() ?? "--"}</span>
+            <span data-testid="latest-bpm" class={`text-[clamp(5.5rem,18vw,10.5rem)] font-extrabold leading-[0.9] tracking-normal tabular-nums ${isMobile() ? "!text-[clamp(8.8rem,38vw,12rem)] !leading-[0.82]" : ""}`} style={{ color: latestZone()?.color || "#172019" }}>{latestRate() ?? "--"}</span>
             <span class={`font-extrabold text-[#617066] ${isMobile() ? "text-[1.05rem]" : ""}`}>bpm</span>
           </div>
-          <div class={`mt-3.5 min-h-[26px] font-semibold text-[#617066] ${isMobile() ? "!mt-0.5 min-h-[18px] text-[0.95rem]" : ""}`}>{trend()}</div>
+          <div data-testid="trend" class={`mt-3.5 min-h-[26px] font-semibold text-[#617066] ${isMobile() ? "!mt-0.5 min-h-[18px] text-[0.95rem]" : ""}`}>{trend()}</div>
         </div>
 
         <div class={`grid ${connected() ? "grid-cols-3" : "grid-cols-2"} gap-2.5 ${isMobile() ? "!gap-1.5" : ""}`} aria-label="Bluetooth and exercise controls">
           <Show when={!connected()}>
-            <button class={`${primaryButtonClass} col-span-full ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" onClick={connectMonitor}>Connect monitor</button>
+            <button data-testid="connect-button" class={`${primaryButtonClass} col-span-full ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" onClick={connectMonitor}>Connect monitor</button>
           </Show>
           <Show when={connected()}>
-            <button class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.9rem]" : ""}`} type="button" onClick={disconnectMonitor}>Disconnect</button>
+            <button data-testid="disconnect-button" class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.9rem]" : ""}`} type="button" onClick={disconnectMonitor}>Disconnect</button>
           </Show>
           <button
+            data-testid="exercise-button"
             class={`${exerciseState() === "running" ? `${secondaryButtonClass} border-[#986b00]/35 bg-[#986b00]/10 text-[#986b00]` : primaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`}
             type="button"
             disabled={!connected()}
@@ -1438,6 +1456,7 @@ export default function App() {
             {exerciseButtonLabel()}
           </button>
           <button
+            data-testid="stop-button"
             class={`${secondaryButtonClass} relative overflow-hidden ${stopHoldProgress() > 0 ? "border-[#d9184b]/45 text-[#d9184b]" : ""} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`}
             type="button"
             disabled={exerciseState() !== "running" && exerciseState() !== "paused"}
@@ -1469,26 +1488,26 @@ export default function App() {
           <Show when={!isMobile()}>
             <div>
               <div id="chart-title" class="grid grid-cols-3 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
-                <button class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
-                <button class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
-                <button class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
+                <button data-testid="view-tab-live" class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
+                <button data-testid="view-tab-log" class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
+                <button data-testid="view-tab-metrics" class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
               </div>
             </div>
           </Show>
           <div class={`grid grid-cols-4 gap-2 ${isMobile() ? "!w-full !grid-cols-4 !gap-1" : ""}`}>
-            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
+            <div data-testid="stat-time" class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{formatDuration(displayDurationMs())}</span>
               <small class="block font-bold text-[#617066]">Time</small>
             </div>
-            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
+            <div data-testid="stat-min" class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().min}</span>
               <small class="block font-bold text-[#617066]">Min HR</small>
             </div>
-            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
+            <div data-testid="stat-avg" class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().avg}</span>
               <small class="block font-bold text-[#617066]">Avg HR</small>
             </div>
-            <div class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
+            <div data-testid="stat-max" class={`${statTileClass} ${isMobile() ? "!min-w-0 !p-[5px_6px] text-left [&_span]:text-[1.05rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_small]:text-[0.68rem] [&_small]:whitespace-nowrap" : "w-20 [&_span]:text-[1.1rem] [&_span]:font-extrabold [&_span]:tabular-nums [&_span]:whitespace-nowrap"}`}>
               <span class="block">{displayStats().max}</span>
               <small class="block font-bold text-[#617066]">Max HR</small>
             </div>
@@ -1497,9 +1516,9 @@ export default function App() {
 
         <Show when={isMobile()}>
           <div class="mt-2 grid grid-cols-3 rounded-lg border border-[#dbe2dc] bg-[#fbfcfb] p-1" aria-label="Exercise view">
-            <button class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
-            <button class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
-            <button class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
+            <button data-testid="view-tab-live" class={viewTabClass("live")} type="button" onClick={() => setDetailView("live")}>Live</button>
+            <button data-testid="view-tab-log" class={viewTabClass("log")} type="button" onClick={() => setDetailView("log")}>Log</button>
+            <button data-testid="view-tab-metrics" class={viewTabClass("metrics")} type="button" onClick={() => setDetailView("metrics")}>Metrics</button>
           </div>
         </Show>
 
@@ -1533,6 +1552,7 @@ export default function App() {
                 <label class="mb-2 grid gap-1">
                   <span class="text-[0.72rem] font-bold uppercase tracking-[0.04em] text-[#617066]">Filter by type</span>
                   <select
+                    data-testid="log-type-filter"
                     class="min-h-9 rounded-lg border border-[#dbe2dc] bg-white px-2.5 text-[0.85rem] font-bold text-[#172019]"
                     value={logTypeFilter() ?? ""}
                     onChange={(event) => {
@@ -1546,11 +1566,12 @@ export default function App() {
                   </select>
                 </label>
               </Show>
-              <Show when={visibleExerciseLog().length} fallback={<p class="m-0 p-3 text-sm font-semibold text-[#617066]">No exercises yet.</p>}>
-                <div class="grid gap-1.5">
+              <Show when={visibleExerciseLog().length} fallback={<p data-testid="log-empty" class="m-0 p-3 text-sm font-semibold text-[#617066]">No exercises yet.</p>}>
+                <div class="grid gap-1.5" data-testid="log-entries">
                   <For each={filteredExerciseLog()}>
                     {(entry) => (
                       <button
+                        data-testid={`log-entry-${entry.id}`}
                         class={`rounded-md border px-3 py-2 text-left ${entry.id === selectedLog()?.id ? "border-[#d9184b]/35 bg-white text-[#172019]" : "border-transparent text-[#617066] hover:bg-white"}`}
                         type="button"
                         onClick={() => setSelectedLogId(entry.id)}
@@ -1565,13 +1586,14 @@ export default function App() {
                   </For>
                 </div>
                 <Show when={visibleExerciseLog().length && !filteredExerciseLog().length}>
-                  <p class="m-0 px-2 py-3 text-sm font-semibold text-[#617066]">No exercises match this type filter.</p>
+                  <p data-testid="log-filter-empty" class="m-0 px-2 py-3 text-sm font-semibold text-[#617066]">No exercises match this type filter.</p>
                 </Show>
               </Show>
               <div class="mt-auto grid grid-cols-3 gap-2 border-t border-[#dbe2dc] pt-2">
-                <button class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" disabled={!visibleExerciseLog().length} onClick={exportExerciseLog}>Export</button>
-                <button class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" onClick={() => importInput.click()}>Import</button>
+                <button data-testid="export-log-button" class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" disabled={!visibleExerciseLog().length} onClick={exportExerciseLog}>Export</button>
+                <button data-testid="import-log-button" class={`${secondaryButtonClass} !min-h-9 !px-2 !text-[0.82rem]`} type="button" onClick={() => importInput.click()}>Import</button>
                 <button
+                  data-testid="delete-log-button"
                   class={`${secondaryButtonClass} relative !min-h-9 overflow-hidden !px-2 !text-[0.82rem] ${deleteHoldProgress() > 0 ? "border-[#d9184b]/45 text-[#d9184b]" : ""}`}
                   type="button"
                   disabled={!selectedLog()}
@@ -1594,7 +1616,7 @@ export default function App() {
                   <span class="absolute inset-y-0 left-0 bg-[#d9184b]/12" style={{ width: `${deleteHoldProgress() * 100}%` }} />
                   <span class="relative">{deleteHoldProgress() > 0 ? "Hold" : "Delete"}</span>
                 </button>
-                <input ref={importInput} class="hidden" type="file" accept="application/json,.json" onChange={importExerciseLog} />
+                <input ref={importInput} data-testid="import-log-input" class="hidden" type="file" accept="application/json,.json" onChange={importExerciseLog} />
               </div>
             </div>
             <div class="min-w-0">
@@ -1627,7 +1649,7 @@ export default function App() {
                 )}
               </Show>
               <Show when={selectedLogHrr() !== null}>
-                <div class={`mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2 ${isMobile() ? "!mb-1.5" : ""}`}>
+                <div data-testid="log-hrr-stat" class={`mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2 ${isMobile() ? "!mb-1.5" : ""}`}>
                   <div class={`${statTileClass} text-left ${isMobile() ? "!min-w-0 !p-[5px_8px]" : ""}`}>
                     <span class="block text-[1.05rem] font-extrabold tabular-nums text-[#f77f00]">−{selectedLogHrr()} bpm</span>
                     <small class="block font-bold text-[#617066]">HRR 1 min</small>
