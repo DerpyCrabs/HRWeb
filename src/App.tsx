@@ -95,6 +95,8 @@ type BluetoothNavigator = Navigator & {
 
 const HEART_RATE_SERVICE = "heart_rate";
 const HEART_RATE_MEASUREMENT = "heart_rate_measurement";
+const RECONNECT_INITIAL_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 15000;
 const ZONES_STORAGE_KEY = "heartRateExercise.zones.v1";
 const EXERCISE_LOG_STORAGE_KEY = "heartRateExercise.log.v1";
 const STOP_HOLD_MS = 1000;
@@ -791,9 +793,14 @@ export default function App() {
   let simulateInterval: number | undefined;
   let simulateBpm = 100;
   let simulateTarget = 100;
+  let userInitiatedDisconnect = false;
+  let reconnectAttempt = 0;
+  let reconnectTimer: number | undefined;
 
   const [simulatedConnected, setSimulatedConnected] = createSignal(false);
-  const connected = createMemo(() => simulatedConnected() || Boolean(device()?.gatt?.connected && characteristic()));
+  const [monitorConnected, setMonitorConnected] = createSignal(false);
+  const [reconnecting, setReconnecting] = createSignal(false);
+  const connected = createMemo(() => simulatedConnected() || monitorConnected());
   const currentElapsedMs = createMemo(() => {
     if (exerciseState() !== "running" || exerciseStartedAt() === null) {
       return exerciseElapsedMs();
@@ -942,6 +949,8 @@ export default function App() {
   });
 
   onCleanup(() => {
+    userInitiatedDisconnect = true;
+    cancelReconnect();
     if (notificationCharacteristic) {
       notificationCharacteristic.removeEventListener("characteristicvaluechanged", handleHeartRateNotification);
     }
@@ -1077,6 +1086,116 @@ export default function App() {
     setReadings([]);
   }
 
+  function cancelReconnect(): void {
+    if (reconnectTimer !== undefined) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+  }
+
+  function restoreConnectionStatus(): void {
+    const state = exerciseState();
+    if (state === "running") {
+      setStatus("Recording", "live");
+      setMessage("");
+      setTrend("Recording");
+    } else if (state === "paused") {
+      setStatus("Paused", "warn");
+      setMessage("");
+    } else {
+      setStatus("Live", "live");
+      setMessage("Connected.");
+      if (idleStartedAt() === null) {
+        const startedAt = Date.now();
+        setIdleStartedAt(startedAt);
+        setNow(startedAt);
+      }
+    }
+  }
+
+  async function attachToDevice(nextDevice: HeartRateDevice): Promise<void> {
+    if (notificationCharacteristic) {
+      notificationCharacteristic.removeEventListener("characteristicvaluechanged", handleHeartRateNotification);
+      try {
+        await notificationCharacteristic.stopNotifications();
+      } catch {
+        // Notification shutdown can race with a device-level disconnect.
+      }
+    }
+
+    const server = await nextDevice.gatt?.connect();
+    if (!server) {
+      throw new Error("Bluetooth device did not expose a GATT server.");
+    }
+
+    const service = await server.getPrimaryService(HEART_RATE_SERVICE);
+    const nextCharacteristic = await service.getCharacteristic(HEART_RATE_MEASUREMENT);
+
+    await nextCharacteristic.startNotifications();
+    nextCharacteristic.addEventListener("characteristicvaluechanged", handleHeartRateNotification);
+
+    notificationCharacteristic = nextCharacteristic;
+    setDevice(nextDevice);
+    setCharacteristic(nextCharacteristic);
+    setMonitorConnected(true);
+  }
+
+  function scheduleReconnect(): void {
+    if (userInitiatedDisconnect || !device()) {
+      return;
+    }
+
+    const delay = Math.min(
+      RECONNECT_INITIAL_DELAY_MS * 2 ** Math.max(0, reconnectAttempt - 1),
+      RECONNECT_MAX_DELAY_MS,
+    );
+
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = undefined;
+      void attemptReconnect();
+    }, delay);
+  }
+
+  async function attemptReconnect(): Promise<void> {
+    const currentDevice = device();
+    if (!currentDevice || userInitiatedDisconnect) {
+      return;
+    }
+
+    reconnectAttempt += 1;
+    setStatus("Reconnecting", "warn");
+    setMessage(`Connection lost. Retrying (${reconnectAttempt})...`);
+
+    try {
+      await attachToDevice(currentDevice);
+      reconnectAttempt = 0;
+      setReconnecting(false);
+      restoreConnectionStatus();
+    } catch {
+      scheduleReconnect();
+    }
+  }
+
+  function finalizeDisconnect(): void {
+    cancelReconnect();
+    setReconnecting(false);
+    userInitiatedDisconnect = false;
+    reconnectAttempt = 0;
+    setMonitorConnected(false);
+    setStatus("Disconnected", "warn");
+    setMessage("Disconnected.");
+    setDevice(null);
+    setCharacteristic(null);
+    notificationCharacteristic = null;
+    setIdleStartedAt(null);
+    setReadings([]);
+  }
+
+  function cancelReconnectMonitor(): void {
+    userInitiatedDisconnect = true;
+    finalizeDisconnect();
+  }
+
   async function connectMonitor() {
     if (!("bluetooth" in navigator)) {
       setStatus("Unsupported", "warn");
@@ -1085,6 +1204,12 @@ export default function App() {
     }
 
     try {
+      userInitiatedDisconnect = false;
+      cancelReconnect();
+      reconnectAttempt = 0;
+      setReconnecting(false);
+      setMonitorConnected(false);
+
       setStatus("Pairing", "warn");
       setMessage("Pairing...");
 
@@ -1096,27 +1221,8 @@ export default function App() {
 
       nextDevice.addEventListener("gattserverdisconnected", handleDisconnect);
 
-      const server = await nextDevice.gatt?.connect();
-      if (!server) {
-        throw new Error("Bluetooth device did not expose a GATT server.");
-      }
-
-      const service = await server.getPrimaryService(HEART_RATE_SERVICE);
-      const nextCharacteristic = await service.getCharacteristic(HEART_RATE_MEASUREMENT);
-
-      await nextCharacteristic.startNotifications();
-      nextCharacteristic.addEventListener("characteristicvaluechanged", handleHeartRateNotification);
-
-      notificationCharacteristic = nextCharacteristic;
-      setDevice(nextDevice);
-      setCharacteristic(nextCharacteristic);
-      setStatus("Live", "live");
-      setMessage("Connected.");
-      if (exerciseState() === "idle") {
-        const startedAt = Date.now();
-        setIdleStartedAt(startedAt);
-        setNow(startedAt);
-      }
+      await attachToDevice(nextDevice);
+      restoreConnectionStatus();
     } catch (error) {
       const bluetoothError = error as Error;
       setStatus("Idle");
@@ -1134,6 +1240,10 @@ export default function App() {
       return;
     }
 
+    userInitiatedDisconnect = true;
+    cancelReconnect();
+    setReconnecting(false);
+
     if (notificationCharacteristic) {
       notificationCharacteristic.removeEventListener("characteristicvaluechanged", handleHeartRateNotification);
       try {
@@ -1146,17 +1256,28 @@ export default function App() {
     if (device()?.gatt?.connected) {
       device()?.gatt?.disconnect();
     } else {
-      handleDisconnect();
+      finalizeDisconnect();
     }
   }
 
-  function handleDisconnect() {
-    setStatus("Disconnected", "warn");
-    setMessage("Disconnected.");
+  function handleDisconnect(): void {
+    setMonitorConnected(false);
     setCharacteristic(null);
     notificationCharacteristic = null;
-    setIdleStartedAt(null);
-    setReadings([]);
+
+    if (userInitiatedDisconnect) {
+      finalizeDisconnect();
+      return;
+    }
+
+    if (exerciseState() === "running") {
+      pauseExercise();
+    }
+
+    setReconnecting(true);
+    setStatus("Reconnecting", "warn");
+    setMessage("Connection lost. Retrying...");
+    scheduleReconnect();
   }
 
   function startExercise() {
@@ -1440,8 +1561,11 @@ export default function App() {
         </div>
 
         <div class={`grid ${connected() ? "grid-cols-3" : "grid-cols-2"} gap-2.5 ${isMobile() ? "!gap-1.5" : ""}`} aria-label="Bluetooth and exercise controls">
-          <Show when={!connected()}>
+          <Show when={!connected() && !reconnecting()}>
             <button data-testid="connect-button" class={`${primaryButtonClass} col-span-full ${isMobile() ? "!min-h-10 !px-2.5 text-[0.95rem]" : ""}`} type="button" onClick={connectMonitor}>Connect monitor</button>
+          </Show>
+          <Show when={reconnecting()}>
+            <button data-testid="cancel-reconnect-button" class={`${secondaryButtonClass} col-span-full ${isMobile() ? "!min-h-10 !px-2.5 text-[0.9rem]" : ""}`} type="button" onClick={cancelReconnectMonitor}>Cancel reconnect</button>
           </Show>
           <Show when={connected()}>
             <button data-testid="disconnect-button" class={`${secondaryButtonClass} ${isMobile() ? "!min-h-10 !px-2.5 text-[0.9rem]" : ""}`} type="button" onClick={disconnectMonitor}>Disconnect</button>
