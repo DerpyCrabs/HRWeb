@@ -26,6 +26,13 @@ type Reading = {
   time: number;
 };
 
+type ChartRange = {
+  id: string;
+  label: string;
+  startMs: number;
+  endMs: number;
+};
+
 type ExerciseLogEntry = {
   id: string;
   startedAt: number;
@@ -35,6 +42,7 @@ type ExerciseLogEntry = {
   targetZoneId: number;
   zones: Zone[];
   exerciseType?: string;
+  ranges: ChartRange[];
   hiddenAt?: number;
 };
 
@@ -204,6 +212,13 @@ function sanitizeLogEntry(value: unknown): ExerciseLogEntry | null {
     targetZoneId,
     zones: normalizeZones(entryZones.map((zone) => ({ ...zone }))),
     exerciseType: typeof entry.exerciseType === "string" && entry.exerciseType.trim() ? entry.exerciseType.trim() : undefined,
+    ranges: Array.isArray(entry.ranges)
+      ? entry.ranges.filter((range): range is ChartRange => {
+          const item = range as ChartRange;
+          return typeof item.id === "string" && typeof item.label === "string" &&
+            Number.isFinite(item.startMs) && Number.isFinite(item.endMs) && item.startMs < item.endMs;
+        }).sort((a, b) => a.startMs - b.startMs)
+      : [],
     hiddenAt: Number.isFinite(entry.hiddenAt) ? entry.hiddenAt : undefined,
   };
 }
@@ -334,36 +349,55 @@ type HeartChartProps = {
   mobile: Accessor<boolean>;
   showTimeAxis?: Accessor<boolean>;
   durationMs?: Accessor<number>;
+  ranges?: Accessor<ChartRange[]>;
+  selectable?: Accessor<boolean>;
+  onRangeSelected?(startMs: number, endMs: number): void;
+  onRangeClick?(range: ChartRange): void;
 };
 
 function HeartChart(props: HeartChartProps): JSX.Element {
   let canvas!: HTMLCanvasElement;
+  let dragStart: number | null = null;
+  const [draft, setDraft] = createSignal<{ startMs: number; endMs: number } | null>(null);
+
+  const timeAtPointer = (event: PointerEvent): number => {
+    const values = props.readings();
+    const first = values[0]?.time ?? 0;
+    const last = values[values.length - 1]?.time ?? first;
+    const rect = canvas.getBoundingClientRect();
+    const mobile = props.mobile();
+    const padding = mobile ? Math.max(20, rect.width * 0.035) : Math.max(34, rect.width * 0.04);
+    const left = mobile ? (props.showTimeAxis?.() ? padding * 1.4 : 0) : padding;
+    const right = mobile ? (props.showTimeAxis?.() ? padding * 0.55 : 0) : padding * 0.5;
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left - left) / Math.max(1, rect.width - left - right)));
+    return Math.round(first + ratio * Math.max(0, last - first));
+  };
+
+  const redraw = () => drawChart(canvas, props.readings(), props.zones(), props.targetZoneId(), props.mobile(), props.showTimeAxis?.() ?? false, props.durationMs?.() ?? 0, props.ranges?.() ?? [], draft());
 
   createEffect(() => {
     const readings = props.readings();
     const zones = props.zones();
     const targetZoneId = props.targetZoneId();
     const durationMs = props.durationMs?.() ?? 0;
-    drawChart(canvas, readings, zones, targetZoneId, props.mobile(), props.showTimeAxis?.() ?? false, durationMs);
+    props.ranges?.();
+    draft();
+    drawChart(canvas, readings, zones, targetZoneId, props.mobile(), props.showTimeAxis?.() ?? false, durationMs, props.ranges?.() ?? [], draft());
   });
 
   onMount(() => {
-    const resize = () => drawChart(
-      canvas,
-      props.readings(),
-      props.zones(),
-      props.targetZoneId(),
-      props.mobile(),
-      props.showTimeAxis?.() ?? false,
-      props.durationMs?.() ?? 0,
-    );
+    const resize = redraw;
     window.addEventListener("resize", resize);
     onCleanup(() => window.removeEventListener("resize", resize));
   });
 
   return (
     <div class={`mt-5 w-full aspect-[16/9] min-h-[360px] ${props.mobile() ? "!mt-2" : ""}`}>
-      <canvas ref={canvas} data-testid="heart-chart" class="block h-full w-full rounded-lg border border-[#dbe2dc] bg-[#fffdfa]" width="1200" height="520" aria-label="Heart rate line chart" />
+      <canvas ref={canvas} data-testid="heart-chart" class={`block h-full w-full rounded-lg border border-[#dbe2dc] bg-[#fffdfa] ${props.selectable?.() ? "cursor-crosshair touch-none" : ""}`} width="1200" height="520" aria-label="Heart rate line chart"
+        onPointerDown={(event) => { if (!props.selectable?.() || props.readings().length < 2) return; canvas.setPointerCapture(event.pointerId); dragStart = timeAtPointer(event); setDraft({ startMs: dragStart, endMs: dragStart }); }}
+        onPointerMove={(event) => { if (dragStart === null) return; setDraft({ startMs: Math.min(dragStart, timeAtPointer(event)), endMs: Math.max(dragStart, timeAtPointer(event)) }); }}
+        onPointerUp={(event) => { if (dragStart === null) return; const end = timeAtPointer(event); const start = Math.min(dragStart, end); const finish = Math.max(dragStart, end); dragStart = null; setDraft(null); if (finish - start >= 1000) props.onRangeSelected?.(start, finish); else { const range = props.ranges?.().find((item) => end >= item.startMs && end <= item.endMs); if (range) props.onRangeClick?.(range); } }}
+        onPointerCancel={() => { dragStart = null; setDraft(null); }} />
     </div>
   );
 }
@@ -385,6 +419,8 @@ function drawChart(
   mobile = false,
   showTimeAxis = false,
   durationMs = 0,
+  ranges: ChartRange[] = [],
+  draft: { startMs: number; endMs: number } | null = null,
 ): void {
   if (!canvas) return;
 
@@ -478,6 +514,24 @@ function drawChart(
   const minWindowMs = durationMs < 60_000 ? Math.max(durationMs, 10_000) : 60_000;
   const axisMaxMs = Math.max(minWindowMs, durationMs, lastReadingTime, 1);
   const xForPoint = (point: Reading) => left + ((point.time - firstTime) / readingSpanMs) * plotWidth;
+  const xForTime = (time: number) => left + ((time - firstTime) / readingSpanMs) * plotWidth;
+
+  [...ranges, ...(draft ? [{ id: "draft", label: "New range", ...draft }] : [])].forEach((range, index) => {
+    const startX = xForTime(range.startMs);
+    const endX = xForTime(range.endMs);
+    ctx.fillStyle = range.id === "draft" ? "rgba(217,24,75,.14)" : `hsla(${(index * 67 + 205) % 360},65%,45%,.12)`;
+    ctx.fillRect(startX, top, Math.max(1, endX - startX), plotHeight);
+    ctx.strokeStyle = range.id === "draft" ? "#d9184b" : `hsl(${(index * 67 + 205) % 360},55%,38%)`;
+    ctx.lineWidth = Math.max(1, Math.round(width / 900));
+    ctx.strokeRect(startX, top, Math.max(1, endX - startX), plotHeight);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(startX, top, Math.max(1, endX - startX), plotHeight); ctx.clip();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = chartFont(cssWidth, ratio, 10, 105, 700);
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(range.label, startX + 5, top + 5);
+    ctx.restore();
+  });
 
   if (showTimeAxis) {
     const tickCount = mobile ? 4 : 6;
@@ -551,6 +605,42 @@ function drawChart(
   ctx.beginPath();
   ctx.arc(latestX, latestY, Math.max(5, Math.round(width / 170)), 0, Math.PI * 2);
   ctx.fill();
+}
+
+function RangeStats(props: { ranges: Accessor<ChartRange[]>; readings: Accessor<Reading[]>; onDelete(id: string): void }): JSX.Element {
+  const stats = (range: ChartRange) => {
+    const points = props.readings().filter((point) => point.time >= range.startMs && point.time <= range.endMs);
+    if (!points.length) return null;
+    let rise = 0;
+    let fall = 0;
+    for (let index = 1; index < points.length; index += 1) {
+      const change = points[index]!.bpm - points[index - 1]!.bpm;
+      rise = Math.max(rise, change);
+      fall = Math.min(fall, change);
+    }
+    const values = points.map((point) => point.bpm);
+    return { start: values[0]!, end: values[values.length - 1]!, delta: values[values.length - 1]! - values[0]!, min: Math.min(...values), max: Math.max(...values), avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length), rise, fall };
+  };
+
+  return <Show when={props.ranges().length}>
+    <div class="mt-3 grid gap-2" aria-label="Labeled chart ranges">
+      <For each={props.ranges()}>{(range) => {
+        const values = () => stats(range);
+        return <div class="rounded-lg border border-[#dbe2dc] bg-white p-3">
+          <div class="flex items-center justify-between gap-2">
+            <div><strong>{range.label}</strong><span class="ml-2 text-xs font-bold text-[#617066]">{formatDuration(range.startMs)}–{formatDuration(range.endMs)}</span></div>
+            <button class="rounded px-2 py-1 text-xs font-bold text-[#d9184b] hover:bg-[#d9184b]/10" type="button" onClick={() => props.onDelete(range.id)}>Delete</button>
+          </div>
+          <Show when={values()}>{(value) => <div class="mt-2 grid grid-cols-4 gap-2 text-sm max-[700px]:grid-cols-2">
+            <span><b>{value().start}→{value().end}</b><small class="block text-[#617066]">Start → end</small></span>
+            <span><b class={value().delta > 0 ? "text-[#087f5b]" : value().delta < 0 ? "text-[#d9184b]" : ""}>{value().delta > 0 ? "+" : ""}{value().delta} bpm</b><small class="block text-[#617066]">Total change</small></span>
+            <span><b>{value().min}/{value().avg}/{value().max}</b><small class="block text-[#617066]">Min / avg / max</small></span>
+            <span><b class="text-[#087f5b]">+{value().rise}</b> / <b class="text-[#d9184b]">{value().fall}</b><small class="block text-[#617066]">Max step rise / fall</small></span>
+          </div>}</Show>
+        </div>;
+      }}</For>
+    </div>
+  </Show>;
 }
 
 type ZoneEditorProps = {
@@ -781,6 +871,10 @@ export default function App() {
   const [editTypeDraft, setEditTypeDraft] = createSignal("");
   const [stopHoldProgress, setStopHoldProgress] = createSignal(0);
   const [deleteHoldProgress, setDeleteHoldProgress] = createSignal(0);
+  const [pendingRange, setPendingRange] = createSignal<{ startMs: number; endMs: number } | null>(null);
+  const [rangeLabel, setRangeLabel] = createSignal("");
+  const [rangeMessage, setRangeMessage] = createSignal("");
+  const [selectedRangeId, setSelectedRangeId] = createSignal<string | null>(null);
 
   let notificationCharacteristic: HeartRateCharacteristic | null = null;
   let importInput!: HTMLInputElement;
@@ -852,6 +946,16 @@ export default function App() {
     return entries.find((entry) => entry.id === id) || entries[0] || null;
   });
   const selectedLogReadings = createMemo(() => selectedLog()?.readings || []);
+  const selectedLogRanges = createMemo(() => selectedLog()?.ranges || []);
+  const selectedRange = createMemo(() => selectedLogRanges().find((range) => range.id === selectedRangeId()) || null);
+  const selectedRangeSummary = createMemo(() => {
+    const range = selectedRange();
+    if (!range) return null;
+    const points = selectedLogReadings().filter((point) => point.time >= range.startMs && point.time <= range.endMs);
+    if (!points.length) return null;
+    const values = points.map((point) => point.bpm);
+    return { start: values[0]!, end: values[values.length - 1]!, delta: values[values.length - 1]! - values[0]!, min: Math.min(...values), max: Math.max(...values) };
+  });
   const selectedLogZones = createMemo(() => selectedLog()?.zones || zones());
   const selectedLogTargetZoneId = createMemo(() => selectedLog()?.targetZoneId || targetZoneId());
   const selectedLogStats = createMemo<HeartRateStats>(() => getHeartRateStats(selectedLogReadings(), selectedLogZones(), selectedLog()?.durationMs || 0));
@@ -868,6 +972,37 @@ export default function App() {
   const showTimeAxis = () => true;
   const viewTabClass = (view: DetailView) =>
     `min-h-9 rounded-md px-3 text-[0.9rem] font-extrabold ${detailView() === view ? "bg-white text-[#172019] shadow-sm" : "text-[#617066]"}`;
+
+  function beginRange(startMs: number, endMs: number): void {
+    const overlaps = selectedLogRanges().some((range) => startMs < range.endMs && endMs > range.startMs);
+    if (overlaps) {
+      setPendingRange(null);
+      setRangeMessage("This range overlaps an existing one.");
+      return;
+    }
+    setPendingRange({ startMs, endMs });
+    setRangeLabel("");
+    setRangeMessage("");
+  }
+
+  function savePendingRange(): void {
+    const entry = selectedLog();
+    const pending = pendingRange();
+    const label = rangeLabel().trim();
+    if (!entry || !pending || !label) return;
+    const nextRange: ChartRange = { id: `range-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, label, ...pending };
+    setExerciseLog((entries) => entries.map((item) => item.id === entry.id ? { ...item, ranges: [...item.ranges, nextRange].sort((a, b) => a.startMs - b.startMs) } : item));
+    setPendingRange(null);
+    setRangeLabel("");
+    setSelectedRangeId(nextRange.id);
+  }
+
+  function deleteRange(id: string): void {
+    const entry = selectedLog();
+    if (!entry) return;
+    setExerciseLog((entries) => entries.map((item) => item.id === entry.id ? { ...item, ranges: item.ranges.filter((range) => range.id !== id) } : item));
+    setSelectedRangeId(null);
+  }
 
   createEffect(() => {
     saveZoneState(zones(), targetZoneId());
@@ -1355,6 +1490,7 @@ export default function App() {
       readings: currentReadings,
       targetZoneId: targetZoneId(),
       zones: zones().map((zone) => ({ ...zone })),
+      ranges: [],
     };
 
     setExerciseLog((entries) => [entry, ...entries]);
@@ -1780,7 +1916,21 @@ export default function App() {
                   </div>
                 </div>
               </Show>
-              <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} />
+              <div class="mb-2 flex items-center justify-between gap-2 text-sm font-semibold text-[#617066]"><span>Drag across the chart to label a range</span><span>{selectedLogRanges().length} range{selectedLogRanges().length === 1 ? "" : "s"}</span></div>
+              <div class="relative">
+                <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} ranges={selectedLogRanges} selectable={() => Boolean(selectedLog())} onRangeSelected={beginRange} onRangeClick={(range) => setSelectedRangeId(range.id)} />
+                <Show when={selectedRange()}>{(range) => <Show when={selectedRangeSummary()}>{(summary) =>
+                  <div class="absolute right-3 top-8 z-10 max-w-[260px] rounded-lg border border-[#dbe2dc] bg-white/95 p-3 shadow-lg backdrop-blur-sm">
+                    <div class="flex items-start justify-between gap-4"><div><strong class="block">{range().label}</strong><small class="font-bold text-[#617066]">{formatDuration(range().startMs)}–{formatDuration(range().endMs)}</small></div><button class="text-lg leading-none text-[#617066]" type="button" aria-label="Close range details" onClick={() => setSelectedRangeId(null)}>×</button></div>
+                    <div class="mt-2 flex items-end justify-between gap-4 text-sm"><span><b>{summary().start}→{summary().end}</b><small class="block text-[#617066]">bpm</small></span><span><b class={summary().delta > 0 ? "text-[#087f5b]" : summary().delta < 0 ? "text-[#d9184b]" : ""}>{summary().delta > 0 ? "+" : ""}{summary().delta}</b><small class="block text-[#617066]">change</small></span><button class="font-bold text-[#d9184b]" type="button" onClick={() => deleteRange(range().id)}>Delete</button></div>
+                  </div>
+                }</Show>}</Show>
+              </div>
+              <Show when={pendingRange()}>{(range) => <form class="mt-2 flex gap-2 rounded-lg border border-[#d9184b]/25 bg-[#d9184b]/5 p-2" onSubmit={(event) => { event.preventDefault(); savePendingRange(); }}>
+                <input class="min-w-0 flex-1 rounded-md border border-[#dbe2dc] bg-white px-3" value={rangeLabel()} onInput={(event) => setRangeLabel(event.currentTarget.value)} placeholder={`${formatDuration(range().startMs)}–${formatDuration(range().endMs)} label`} autofocus />
+                <button class={`${primaryButtonClass} !min-h-9`} type="submit" disabled={!rangeLabel().trim()}>Save</button><button class={`${secondaryButtonClass} !min-h-9`} type="button" onClick={() => setPendingRange(null)}>Cancel</button>
+              </form>}</Show>
+              <Show when={rangeMessage()}><p class="my-2 text-sm font-bold text-[#d9184b]">{rangeMessage()}</p></Show>
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
             </div>
           </div>
