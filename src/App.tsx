@@ -411,6 +411,28 @@ function chartAxisLabelPx(cssWidth: number, mobile: boolean): number {
   return Math.max(mobile ? 11 : 12, Math.round(cssWidth / (mobile ? 58 : 52)));
 }
 
+const NICE_TIME_STEPS_MS = [
+  1_000, 2_000, 5_000, 10_000, 15_000, 30_000,
+  60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000, 30 * 60_000,
+  60 * 60_000, 2 * 60 * 60_000, 3 * 60 * 60_000, 6 * 60 * 60_000,
+];
+
+function getNiceTimeStep(durationMs: number, maxIntervals: number): number {
+  const minimumStep = Math.max(1, durationMs) / Math.max(1, maxIntervals);
+  return NICE_TIME_STEPS_MS.find((step) => step >= minimumStep)
+    ?? Math.ceil(minimumStep / (60 * 60_000)) * 60 * 60_000;
+}
+
+function formatChartTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function drawChart(
   canvas: HTMLCanvasElement | undefined,
   readings: Reading[],
@@ -510,11 +532,10 @@ function drawChart(
 
   const firstTime = readings[0]?.time ?? 0;
   const lastReadingTime = readings[readings.length - 1]?.time ?? 0;
-  const readingSpanMs = Math.max(1, lastReadingTime - firstTime);
-  const minWindowMs = durationMs < 60_000 ? Math.max(durationMs, 10_000) : 60_000;
+  const minWindowMs = durationMs < 60_000 ? Math.max(durationMs, 5_000) : 60_000;
   const axisMaxMs = Math.max(minWindowMs, durationMs, lastReadingTime, 1);
-  const xForPoint = (point: Reading) => left + ((point.time - firstTime) / readingSpanMs) * plotWidth;
-  const xForTime = (time: number) => left + ((time - firstTime) / readingSpanMs) * plotWidth;
+  const xForPoint = (point: Reading) => left + ((point.time - firstTime) / axisMaxMs) * plotWidth;
+  const xForTime = (time: number) => left + ((time - firstTime) / axisMaxMs) * plotWidth;
 
   [...ranges, ...(draft ? [{ id: "draft", label: "New range", ...draft }] : [])].forEach((range, index) => {
     const startX = xForTime(range.startMs);
@@ -534,7 +555,12 @@ function drawChart(
   });
 
   if (showTimeAxis) {
-    const tickCount = mobile ? 4 : 6;
+    const maxIntervals = mobile ? 4 : Math.max(5, Math.min(10, Math.floor(cssWidth / 60)));
+    const tickStepMs = getNiceTimeStep(axisMaxMs, maxIntervals);
+    const tickTimes: number[] = [];
+    for (let tickTime = 0; tickTime <= axisMaxMs; tickTime += tickStepMs) {
+      tickTimes.push(tickTime);
+    }
     const axisTop = bottom + Math.max(4 * ratio, padding * 0.18);
     const plotRight = left + plotWidth;
 
@@ -549,11 +575,12 @@ function drawChart(
     ctx.font = chartFont(cssWidth, ratio, 12, mobile ? 58 : 52, 600);
     ctx.textBaseline = "top";
 
-    for (let index = 0; index <= tickCount; index += 1) {
-      const ratioPosition = index / tickCount;
-      const x = left + ratioPosition * plotWidth;
-      const elapsedMinutes = (axisMaxMs * ratioPosition) / 60_000;
-      const label = `${elapsedMinutes >= 10 ? String(Math.round(elapsedMinutes)) : elapsedMinutes.toFixed(elapsedMinutes >= 1 ? 1 : 0)}m`;
+    canvas.dataset.timeAxisStepMs = String(tickStepMs);
+    canvas.dataset.timeAxisLabels = tickTimes.map(formatChartTime).join(",");
+
+    tickTimes.forEach((tickTime, index) => {
+      const x = left + (tickTime / axisMaxMs) * plotWidth;
+      const label = formatChartTime(tickTime);
 
       ctx.beginPath();
       ctx.moveTo(x, bottom);
@@ -563,14 +590,14 @@ function drawChart(
       if (index === 0) {
         ctx.textAlign = "left";
         ctx.fillText(label, left, axisTop);
-      } else if (index === tickCount) {
+      } else if (index === tickTimes.length - 1 && tickTime === axisMaxMs) {
         ctx.textAlign = "right";
         ctx.fillText(label, plotRight, axisTop);
       } else {
         ctx.textAlign = "center";
         ctx.fillText(label, x, axisTop);
       }
-    }
+    });
   }
 
   if (readings.length < 2) return;

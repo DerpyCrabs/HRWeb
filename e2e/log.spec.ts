@@ -77,6 +77,31 @@ test.describe("Exercise log", () => {
     await expect(page.getByTestId("stat-time")).toContainText("02:00");
   });
 
+  test("uses stable, readable time-axis intervals as duration grows", async ({ page }) => {
+    await seedExerciseLog(page, [
+      makeLogEntry({
+        id: "short-axis",
+        stoppedAt: Date.now(),
+        durationMs: 5_000,
+        readings: [{ bpm: 100, time: 0 }, { bpm: 110, time: 5_000 }],
+      }),
+      makeLogEntry({
+        id: "long-axis",
+        stoppedAt: Date.now() - 1000,
+        durationMs: 70_000,
+        readings: [{ bpm: 100, time: 0 }, { bpm: 120, time: 70_000 }],
+      }),
+    ]);
+
+    await page.getByTestId("view-tab-log").click();
+    await expect(page.getByTestId("heart-chart")).toHaveAttribute("data-time-axis-step-ms", "1000");
+    await expect(page.getByTestId("heart-chart")).toHaveAttribute("data-time-axis-labels", "00:00,00:01,00:02,00:03,00:04,00:05");
+
+    await page.getByTestId("log-entry-long-axis").click();
+    await expect(page.getByTestId("heart-chart")).toHaveAttribute("data-time-axis-step-ms", "10000");
+    await expect(page.getByTestId("heart-chart")).toHaveAttribute("data-time-axis-labels", "00:00,00:10,00:20,00:30,00:40,00:50,01:00,01:10");
+  });
+
   test("edits exercise type on existing entry", async ({ page }) => {
     await seedExerciseLog(page, [makeLogEntry({ id: "edit-me" })]);
 
