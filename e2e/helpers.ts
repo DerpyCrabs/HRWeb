@@ -14,6 +14,7 @@ export type TestLogEntry = {
   targetZoneId: number;
   zones: Array<{ id: number; name: string; min: number; max: number; color: string }>;
   exerciseType?: string;
+  ranges?: Array<{ id: string; label: string; startMs: number; endMs: number }>;
 };
 
 const DEFAULT_ZONES = [
@@ -88,6 +89,7 @@ export function makeLogEntry(overrides: Partial<TestLogEntry> = {}): TestLogEntr
     targetZoneId: overrides.targetZoneId ?? 3,
     zones: overrides.zones ?? DEFAULT_ZONES.map((zone) => ({ ...zone })),
     exerciseType: overrides.exerciseType,
+    ranges: overrides.ranges ?? [],
   };
 }
 

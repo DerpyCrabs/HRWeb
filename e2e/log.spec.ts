@@ -172,3 +172,75 @@ test.describe("HRR display in log", () => {
     await expect(page.getByTestId("log-hrr-stat")).toHaveCount(0);
   });
 });
+
+test.describe("Labeled chart ranges", () => {
+  test.beforeEach(async ({ page }) => {
+    await clearAppStorage(page);
+  });
+
+  test("creates and persists a non-overlapping range", async ({ page }) => {
+    await seedExerciseLog(page, [makeLogEntry({ id: "range-create" })]);
+    await page.getByTestId("view-tab-log").click();
+
+    const chart = page.getByTestId("heart-chart");
+    const box = await chart.boundingBox();
+    expect(box).toBeTruthy();
+    await page.mouse.move(box!.x + box!.width * 0.2, box!.y + box!.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + box!.width * 0.45, box!.y + box!.height * 0.5);
+    await page.mouse.up();
+
+    await expect(page.getByTestId("range-form")).toBeVisible();
+    await page.getByTestId("range-label").fill("Warm-up");
+    await page.getByTestId("range-save").click();
+    await expect(page.getByTestId("range-count")).toContainText("1 range");
+    await expect(page.getByTestId("range-details")).toContainText("Warm-up");
+
+    await page.reload();
+    await page.getByTestId("view-tab-log").click();
+    await expect(page.getByTestId("range-count")).toContainText("1 range");
+  });
+
+  test("opens compact details without changing the page height and deletes the range", async ({ page }) => {
+    await seedExerciseLog(page, [makeLogEntry({
+      id: "range-details",
+      ranges: [{ id: "effort", label: "Effort", startMs: 30_000, endMs: 60_000 }],
+    })]);
+    await page.getByTestId("view-tab-log").click();
+
+    const heightBefore = await page.locator("main").evaluate((element) => element.getBoundingClientRect().height);
+    const chart = page.getByTestId("heart-chart");
+    const box = await chart.boundingBox();
+    expect(box).toBeTruthy();
+    await chart.click({ position: { x: box!.width * 0.38, y: box!.height * 0.5 } });
+
+    await expect(page.getByTestId("range-details")).toContainText("Effort");
+    await expect(page.getByTestId("range-details")).toContainText("120→125");
+    const heightAfter = await page.locator("main").evaluate((element) => element.getBoundingClientRect().height);
+    expect(heightAfter).toBe(heightBefore);
+
+    await page.getByTestId("range-delete").click();
+    await expect(page.getByTestId("range-details")).toHaveCount(0);
+    await expect(page.getByTestId("range-count")).toContainText("0 ranges");
+  });
+
+  test("rejects a range that overlaps an existing range", async ({ page }) => {
+    await seedExerciseLog(page, [makeLogEntry({
+      id: "range-overlap",
+      ranges: [{ id: "existing", label: "Existing", startMs: 30_000, endMs: 60_000 }],
+    })]);
+    await page.getByTestId("view-tab-log").click();
+
+    const chart = page.getByTestId("heart-chart");
+    const box = await chart.boundingBox();
+    expect(box).toBeTruthy();
+    await page.mouse.move(box!.x + box!.width * 0.3, box!.y + box!.height * 0.5);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + box!.width * 0.6, box!.y + box!.height * 0.5);
+    await page.mouse.up();
+
+    await expect(page.getByTestId("range-message")).toContainText("overlaps");
+    await expect(page.getByTestId("range-form")).toHaveCount(0);
+    await expect(page.getByTestId("range-count")).toContainText("1 range");
+  });
+});

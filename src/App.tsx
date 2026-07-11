@@ -1916,21 +1916,21 @@ export default function App() {
                   </div>
                 </div>
               </Show>
-              <div class="mb-2 flex items-center justify-between gap-2 text-sm font-semibold text-[#617066]"><span>Drag across the chart to label a range</span><span>{selectedLogRanges().length} range{selectedLogRanges().length === 1 ? "" : "s"}</span></div>
+              <div data-testid="range-toolbar" class="mb-2 flex items-center justify-between gap-2 text-sm font-semibold text-[#617066]"><span>Drag across the chart to label a range</span><span data-testid="range-count">{selectedLogRanges().length} range{selectedLogRanges().length === 1 ? "" : "s"}</span></div>
               <div class="relative">
                 <HeartChart readings={displayReadings} zones={displayZones} targetZoneId={displayTargetZoneId} mobile={isMobile} showTimeAxis={showTimeAxis} durationMs={displayChartDurationMs} ranges={selectedLogRanges} selectable={() => Boolean(selectedLog())} onRangeSelected={beginRange} onRangeClick={(range) => setSelectedRangeId(range.id)} />
                 <Show when={selectedRange()}>{(range) => <Show when={selectedRangeSummary()}>{(summary) =>
-                  <div class="absolute right-3 top-8 z-10 max-w-[260px] rounded-lg border border-[#dbe2dc] bg-white/95 p-3 shadow-lg backdrop-blur-sm">
+                  <div data-testid="range-details" class="absolute right-3 top-8 z-10 max-w-[260px] rounded-lg border border-[#dbe2dc] bg-white/95 p-3 shadow-lg backdrop-blur-sm">
                     <div class="flex items-start justify-between gap-4"><div><strong class="block">{range().label}</strong><small class="font-bold text-[#617066]">{formatDuration(range().startMs)}–{formatDuration(range().endMs)}</small></div><button class="text-lg leading-none text-[#617066]" type="button" aria-label="Close range details" onClick={() => setSelectedRangeId(null)}>×</button></div>
-                    <div class="mt-2 flex items-end justify-between gap-4 text-sm"><span><b>{summary().start}→{summary().end}</b><small class="block text-[#617066]">bpm</small></span><span><b class={summary().delta > 0 ? "text-[#087f5b]" : summary().delta < 0 ? "text-[#d9184b]" : ""}>{summary().delta > 0 ? "+" : ""}{summary().delta}</b><small class="block text-[#617066]">change</small></span><button class="font-bold text-[#d9184b]" type="button" onClick={() => deleteRange(range().id)}>Delete</button></div>
+                    <div class="mt-2 flex items-end justify-between gap-4 text-sm"><span><b>{summary().start}→{summary().end}</b><small class="block text-[#617066]">bpm</small></span><span><b class={summary().delta > 0 ? "text-[#087f5b]" : summary().delta < 0 ? "text-[#d9184b]" : ""}>{summary().delta > 0 ? "+" : ""}{summary().delta}</b><small class="block text-[#617066]">change</small></span><button data-testid="range-delete" class="font-bold text-[#d9184b]" type="button" onClick={() => deleteRange(range().id)}>Delete</button></div>
                   </div>
                 }</Show>}</Show>
               </div>
-              <Show when={pendingRange()}>{(range) => <form class="mt-2 flex gap-2 rounded-lg border border-[#d9184b]/25 bg-[#d9184b]/5 p-2" onSubmit={(event) => { event.preventDefault(); savePendingRange(); }}>
-                <input class="min-w-0 flex-1 rounded-md border border-[#dbe2dc] bg-white px-3" value={rangeLabel()} onInput={(event) => setRangeLabel(event.currentTarget.value)} placeholder={`${formatDuration(range().startMs)}–${formatDuration(range().endMs)} label`} autofocus />
-                <button class={`${primaryButtonClass} !min-h-9`} type="submit" disabled={!rangeLabel().trim()}>Save</button><button class={`${secondaryButtonClass} !min-h-9`} type="button" onClick={() => setPendingRange(null)}>Cancel</button>
+              <Show when={pendingRange()}>{(range) => <form data-testid="range-form" class="mt-2 flex gap-2 rounded-lg border border-[#d9184b]/25 bg-[#d9184b]/5 p-2" onSubmit={(event) => { event.preventDefault(); savePendingRange(); }}>
+                <input data-testid="range-label" class="min-w-0 flex-1 rounded-md border border-[#dbe2dc] bg-white px-3" value={rangeLabel()} onInput={(event) => setRangeLabel(event.currentTarget.value)} placeholder={`${formatDuration(range().startMs)}–${formatDuration(range().endMs)} label`} autofocus />
+                <button data-testid="range-save" class={`${primaryButtonClass} !min-h-9`} type="submit" disabled={!rangeLabel().trim()}>Save</button><button class={`${secondaryButtonClass} !min-h-9`} type="button" onClick={() => setPendingRange(null)}>Cancel</button>
               </form>}</Show>
-              <Show when={rangeMessage()}><p class="my-2 text-sm font-bold text-[#d9184b]">{rangeMessage()}</p></Show>
+              <Show when={rangeMessage()}><p data-testid="range-message" class="my-2 text-sm font-bold text-[#d9184b]">{rangeMessage()}</p></Show>
               <ZoneTimeStats stats={displayStats} mobile={isMobile} />
             </div>
           </div>
